@@ -20,12 +20,12 @@ type ConvertedSet struct {
 
 // Block represents a single HCL block (provider or resource).
 type Block struct {
-	Type       string // "provider" or "resource"
-	Label      string // e.g., "aws" or "aws_s3_bucket"
-	Name       string // e.g., "default" or "my_bucket"
+	Type       string
+	Label      string
+	Name       string
 	Attributes map[string]interface{}
-	// SourceKey links back to the Crossplane resource key for diff correlation.
-	SourceKey string
+	SourceKey  string
+	ImportID   string
 }
 
 // Convert transforms rendered Crossplane managed resources into HCL blocks.
@@ -54,9 +54,9 @@ func Convert(rs *renderer.RenderedSet, providers map[string]config.Provider) (*C
 
 	// Convert each managed resource to an HCL resource block
 	for _, r := range rs.Resources {
-		block, err := convertResource(r)
+		block, err := convertResource(r, providers)
 		if err != nil {
-			continue // skip unconvertible resources
+			continue
 		}
 		cs.ResourceBlocks = append(cs.ResourceBlocks, block)
 	}
@@ -103,7 +103,7 @@ func (cs *ConvertedSet) ToHCL() string {
 	return sb.String()
 }
 
-func convertResource(r renderer.RenderedResource) (Block, error) {
+func convertResource(r renderer.RenderedResource, providers map[string]config.Provider) (Block, error) {
 	res := r.Resource
 	apiVersion := res.GetAPIVersion()
 	kind := res.GetKind()
@@ -121,12 +121,15 @@ func convertResource(r renderer.RenderedResource) (Block, error) {
 		attrs["name"] = res.GetName()
 	}
 
+	importID := buildImportID(tfType, attrs, providers)
+
 	return Block{
 		Type:       "resource",
 		Label:      tfType,
 		Name:       name,
 		Attributes: attrs,
 		SourceKey:  r.ResourceKey(),
+		ImportID:   importID,
 	}, nil
 }
 
@@ -340,6 +343,50 @@ func providerSource(name string) string {
 	default:
 		return "hashicorp/" + name
 	}
+}
+
+func buildImportID(tfType string, attrs map[string]interface{}, providers map[string]config.Provider) string {
+	subscriptionID := ""
+	for name, prov := range providers {
+		if strings.ToLower(name) == "azure" && prov.SubscriptionID != "" {
+			subscriptionID = prov.SubscriptionID
+		}
+	}
+
+	rg, _ := attrs["resource_group_name"].(string)
+	name, _ := attrs["name"].(string)
+
+	switch tfType {
+	case "azurerm_storage_account":
+		if subscriptionID != "" && rg != "" && name != "" {
+			return fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Storage/storageAccounts/%s",
+				subscriptionID, rg, name)
+		}
+	case "azurerm_resource_group":
+		if subscriptionID != "" && name != "" {
+			return fmt.Sprintf("/subscriptions/%s/resourceGroups/%s", subscriptionID, name)
+		}
+	case "azurerm_virtual_network":
+		if subscriptionID != "" && rg != "" && name != "" {
+			return fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Network/virtualNetworks/%s",
+				subscriptionID, rg, name)
+		}
+	case "azurerm_subnet":
+		vnet, _ := attrs["virtual_network_name"].(string)
+		if subscriptionID != "" && rg != "" && vnet != "" && name != "" {
+			return fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Network/virtualNetworks/%s/subnets/%s",
+				subscriptionID, rg, vnet, name)
+		}
+	}
+
+	// AWS resources use name/id directly
+	if strings.HasPrefix(tfType, "aws_") {
+		if name != "" {
+			return name
+		}
+	}
+
+	return ""
 }
 
 func guessTerraformType(group, kind string) string {

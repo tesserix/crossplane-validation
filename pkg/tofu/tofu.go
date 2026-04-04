@@ -144,14 +144,18 @@ func setupProviderEnv(providers map[string]config.Provider) []string {
 }
 
 func importBaseState(binary, workDir string, env []string, baseHCL *hcl.ConvertedSet) error {
-	// Write base config temporarily
-	baseTF := filepath.Join(workDir, "main.tf")
-	if err := os.WriteFile(baseTF, []byte(baseHCL.ToHCL()), 0644); err != nil {
-		return err
+	for _, block := range baseHCL.ResourceBlocks {
+		if block.ImportID == "" {
+			continue
+		}
+		addr := block.Label + "." + block.Name
+		fmt.Fprintf(os.Stderr, "Importing %s...\n", addr)
+		err := runTofu(binary, workDir, env, "import", "-no-color", addr, block.ImportID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not import %s: %v\n", addr, err)
+		}
 	}
-
-	// Run refresh to populate state from cloud
-	return runTofu(binary, workDir, env, "plan", "-refresh-only", "-no-color")
+	return nil
 }
 
 func isPlanChangesError(err error) bool {
