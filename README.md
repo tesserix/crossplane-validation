@@ -146,9 +146,9 @@ crossplane-validate render ./crossplane/
 crossplane-validate diff ./crossplane/
 ```
 
-### Cloud-aware plan (Mode 3)
+### Cloud-aware plan
 
-For deeper validation, enable cloud mode. This converts your Crossplane resources to HCL and runs OpenTofu with read-only credentials to show the actual cloud impact:
+For deeper validation, add the `--cloud` flag. This converts your Crossplane resources to HCL and runs OpenTofu with read-only credentials to show the actual cloud impact:
 
 ```bash
 crossplane-validate plan --manifests=./crossplane/ --cloud
@@ -194,9 +194,9 @@ This requires a `.crossplane-validate.yml` config with credentials (see [Configu
                 └───────────────────┘
 ```
 
-**Mode 1 (default):** Git-based diff. Renders manifests from both branches, diffs the output. Fast, offline, no credentials needed.
+**By default**, the tool performs a git-based diff. It renders manifests from both branches and diffs the output. Fast, offline, no credentials needed.
 
-**Mode 3 (--cloud):** Cloud-aware plan. Converts Crossplane managed resources to equivalent Terraform HCL (the mapping is 1:1 because Crossplane's Upjet providers are generated from Terraform providers), then runs OpenTofu plan with read-only credentials.
+**With `--cloud`**, it goes deeper. It converts Crossplane managed resources to equivalent Terraform HCL (the mapping is 1:1 because Crossplane's Upjet providers are generated from Terraform providers) and runs OpenTofu plan with read-only credentials to show what will actually change in your cloud.
 
 ---
 
@@ -378,7 +378,7 @@ Additional resources are detected automatically via Crossplane API group convent
 | **OpenTofu or Terraform** | Only for `--cloud` mode |
 | **Cloud credentials** | Only for `--cloud` mode (read-only recommended) |
 
-For basic validation (Mode 1), all you need is the binary and a git repo.
+For basic validation, all you need is the binary and a git repo.
 
 ---
 
