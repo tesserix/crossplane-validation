@@ -32,33 +32,41 @@ type Block struct {
 func Convert(rs *renderer.RenderedSet, providers map[string]config.Provider) (*ConvertedSet, error) {
 	cs := &ConvertedSet{}
 
-	// Generate provider blocks from config
-	for name, prov := range providers {
-		pb := Block{
-			Type:       "provider",
-			Label:      mapProviderName(name),
-			Name:       "default",
-			Attributes: map[string]interface{}{},
-		}
-		if prov.Region != "" {
-			pb.Attributes["region"] = prov.Region
-		}
-		if prov.Project != "" {
-			pb.Attributes["project"] = prov.Project
-		}
-		if prov.SubscriptionID != "" {
-			pb.Attributes["subscription_id"] = prov.SubscriptionID
-		}
-		cs.ProviderBlocks = append(cs.ProviderBlocks, pb)
-	}
-
-	// Convert each managed resource to an HCL resource block
 	for _, r := range rs.Resources {
 		block, err := convertResource(r, providers)
 		if err != nil {
 			continue
 		}
 		cs.ResourceBlocks = append(cs.ResourceBlocks, block)
+	}
+
+	// Auto-detect required providers from the converted resources
+	needed := detectRequiredProviders(cs.ResourceBlocks)
+
+	// Merge with explicit config — explicit config takes priority
+	for tfProvider, source := range needed {
+		configName := reverseProviderName(tfProvider)
+		prov, hasConfig := providers[configName]
+
+		pb := Block{
+			Type:       "provider",
+			Label:      tfProvider,
+			Name:       "default",
+			Attributes: map[string]interface{}{},
+			SourceKey:  source,
+		}
+		if hasConfig {
+			if prov.Region != "" {
+				pb.Attributes["region"] = prov.Region
+			}
+			if prov.Project != "" {
+				pb.Attributes["project"] = prov.Project
+			}
+			if prov.SubscriptionID != "" {
+				pb.Attributes["subscription_id"] = prov.SubscriptionID
+			}
+		}
+		cs.ProviderBlocks = append(cs.ProviderBlocks, pb)
 	}
 
 	return cs, nil
@@ -365,6 +373,43 @@ func extractAPIGroup(apiVersion string) string {
 		return parts[0]
 	}
 	return apiVersion
+}
+
+func detectRequiredProviders(blocks []Block) map[string]string {
+	needed := map[string]string{}
+	for _, b := range blocks {
+		prefix := strings.Split(b.Label, "_")[0]
+		switch prefix {
+		case "aws":
+			needed["aws"] = "hashicorp/aws"
+		case "google":
+			needed["google"] = "hashicorp/google"
+		case "azurerm":
+			needed["azurerm"] = "hashicorp/azurerm"
+		case "azuread":
+			needed["azuread"] = "hashicorp/azuread"
+		case "datadog":
+			needed["datadog"] = "datadog/datadog"
+		default:
+			needed[prefix] = "hashicorp/" + prefix
+		}
+	}
+	return needed
+}
+
+func reverseProviderName(tfName string) string {
+	switch tfName {
+	case "aws":
+		return "aws"
+	case "google":
+		return "gcp"
+	case "azurerm":
+		return "azure"
+	case "azuread":
+		return "azuread"
+	default:
+		return tfName
+	}
 }
 
 func mapProviderName(name string) string {
