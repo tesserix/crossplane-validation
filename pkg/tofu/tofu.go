@@ -132,7 +132,12 @@ func setupProviderEnv(providers map[string]config.Provider) []string {
 			}
 			// GCP credentials from GOOGLE_APPLICATION_CREDENTIALS or default
 		case "azure":
-			// Azure credentials from standard ARM_* env vars
+			if prov.SubscriptionID != "" {
+				env = append(env, "ARM_SUBSCRIPTION_ID="+prov.SubscriptionID)
+			}
+			if prov.TenantID != "" {
+				env = append(env, "ARM_TENANT_ID="+prov.TenantID)
+			}
 		}
 	}
 	return env

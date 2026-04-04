@@ -2,6 +2,7 @@ package hcl
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/tesserix/crossplane-validation/pkg/config"
@@ -45,6 +46,9 @@ func Convert(rs *renderer.RenderedSet, providers map[string]config.Provider) (*C
 		if prov.Project != "" {
 			pb.Attributes["project"] = prov.Project
 		}
+		if prov.SubscriptionID != "" {
+			pb.Attributes["subscription_id"] = prov.SubscriptionID
+		}
 		cs.ProviderBlocks = append(cs.ProviderBlocks, pb)
 	}
 
@@ -83,6 +87,9 @@ func (cs *ConvertedSet) ToHCL() string {
 	for _, pb := range cs.ProviderBlocks {
 		sb.WriteString(fmt.Sprintf("provider %q {\n", pb.Label))
 		writeAttributes(&sb, pb.Attributes, "  ")
+		if pb.Label == "azurerm" {
+			sb.WriteString("  features {}\n")
+		}
 		sb.WriteString("}\n\n")
 	}
 
@@ -108,6 +115,11 @@ func convertResource(r renderer.RenderedResource) (Block, error) {
 	}
 
 	attrs := extractForProvider(res)
+
+	// Terraform requires a 'name' attribute for most resources
+	if _, hasName := attrs["name"]; !hasName {
+		attrs["name"] = res.GetName()
+	}
 
 	return Block{
 		Type:       "resource",
@@ -343,17 +355,43 @@ func guessTerraformType(group, kind string) string {
 	return provider + "_" + camelToSnake(kind)
 }
 
+var mapStyleFields = map[string]bool{
+	"tags": true, "labels": true, "annotations": true, "environment": true,
+}
+
 func writeAttributes(sb *strings.Builder, attrs map[string]interface{}, indent string) {
-	for k, v := range attrs {
+	keys := sortedKeys(attrs)
+	for _, k := range keys {
+		v := attrs[k]
 		switch val := v.(type) {
 		case map[string]interface{}:
-			sb.WriteString(fmt.Sprintf("%s%s {\n", indent, k))
-			writeAttributes(sb, val, indent+"  ")
-			sb.WriteString(fmt.Sprintf("%s}\n", indent))
+			if mapStyleFields[k] {
+				sb.WriteString(fmt.Sprintf("%s%s = {\n", indent, k))
+				innerKeys := sortedKeys(val)
+				for _, ik := range innerKeys {
+					sb.WriteString(fmt.Sprintf("%s  %s = %q\n", indent, ik, fmt.Sprintf("%v", val[ik])))
+				}
+				sb.WriteString(fmt.Sprintf("%s}\n", indent))
+			} else {
+				sb.WriteString(fmt.Sprintf("%s%s {\n", indent, k))
+				writeAttributes(sb, val, indent+"  ")
+				sb.WriteString(fmt.Sprintf("%s}\n", indent))
+			}
 		case string:
 			sb.WriteString(fmt.Sprintf("%s%s = %q\n", indent, k, val))
-		default:
+		case bool:
 			sb.WriteString(fmt.Sprintf("%s%s = %v\n", indent, k, val))
+		default:
+			sb.WriteString(fmt.Sprintf("%s%s = %q\n", indent, k, fmt.Sprintf("%v", val)))
 		}
 	}
+}
+
+func sortedKeys(m map[string]interface{}) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }

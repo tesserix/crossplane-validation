@@ -15,10 +15,11 @@ type Config struct {
 
 // Provider holds cloud provider configuration for Mode 3 (cloud plan).
 type Provider struct {
-	// Source of credentials: "env", "file", or "secret/<NAME>"
-	Credentials string `yaml:"credentials"`
-	Region      string `yaml:"region,omitempty"`
-	Project     string `yaml:"project,omitempty"`
+	Credentials    string `yaml:"credentials"`
+	Region         string `yaml:"region,omitempty"`
+	Project        string `yaml:"project,omitempty"`
+	SubscriptionID string `yaml:"subscription-id,omitempty"`
+	TenantID       string `yaml:"tenant-id,omitempty"`
 }
 
 // Settings holds optional behavior configuration.
