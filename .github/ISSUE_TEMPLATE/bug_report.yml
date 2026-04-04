@@ -1,0 +1,56 @@
+name: Bug Report
+description: Report a bug in crossplane-validate
+labels: ["bug"]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: A clear description of the bug.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Minimal steps to reproduce the issue.
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: crossplane-validate version
+      placeholder: "e.g., v0.1.0 or dev"
+
+  - type: input
+    id: crossplane-version
+    attributes:
+      label: Crossplane version
+      placeholder: "e.g., v1.17.0"
+
+  - type: dropdown
+    id: provider
+    attributes:
+      label: Cloud provider
+      options:
+        - AWS
+        - GCP
+        - Azure
+        - Multiple
+        - N/A
+
+  - type: textarea
+    id: manifests
+    attributes:
+      label: Relevant manifests
+      description: Paste any relevant Crossplane YAML manifests (redact sensitive values).
+      render: yaml

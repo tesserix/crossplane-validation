@@ -2,3 +2,7 @@ crossplane-validate
 *.exe
 dist/
 .crossplane-validate.yml
+testdata/live-test/
+.env
+*.pem
+*.key
