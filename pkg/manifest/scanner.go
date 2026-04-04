@@ -151,12 +151,8 @@ func (rs *ResourceSet) classify(obj unstructured.Unstructured) {
 	kind := obj.GetKind()
 
 	switch {
-	case apiVersion == "apiextensions.crossplane.io/v1" && kind == "CompositeResourceDefinition":
-		rs.XRDs = append(rs.XRDs, obj)
-	case apiVersion == "apiextensions.crossplane.io/v1" && kind == "Composition":
-		rs.Compositions = append(rs.Compositions, obj)
-	case apiVersion == "pkg.crossplane.io/v1" && kind == "Function":
-		rs.Functions = append(rs.Functions, obj)
+	case isCrossplaneCore(apiVersion, kind):
+		rs.classifyCrossplaneCore(apiVersion, kind, obj)
 	case strings.HasSuffix(kind, "Claim"):
 		rs.Claims = append(rs.Claims, obj)
 	case isProviderConfig(apiVersion, kind):
@@ -170,44 +166,107 @@ func (rs *ResourceSet) classify(obj unstructured.Unstructured) {
 	}
 }
 
+func (rs *ResourceSet) classifyCrossplaneCore(apiVersion, kind string, obj unstructured.Unstructured) {
+	switch {
+	case kind == "CompositeResourceDefinition":
+		rs.XRDs = append(rs.XRDs, obj)
+	case kind == "Composition":
+		rs.Compositions = append(rs.Compositions, obj)
+	case kind == "Function":
+		rs.Functions = append(rs.Functions, obj)
+	default:
+		rs.Other = append(rs.Other, obj)
+	}
+}
+
+func isCrossplaneCore(apiVersion, kind string) bool {
+	return strings.HasPrefix(apiVersion, "apiextensions.crossplane.io/") ||
+		strings.HasPrefix(apiVersion, "pkg.crossplane.io/")
+}
+
 func isProviderConfig(apiVersion, kind string) bool {
 	return kind == "ProviderConfig" || kind == "StoreConfig"
 }
 
 func isManagedResource(apiVersion string) bool {
-	providerPrefixes := []string{
-		"s3.aws.upbound.io",
-		"ec2.aws.upbound.io",
-		"iam.aws.upbound.io",
-		"rds.aws.upbound.io",
-		"eks.aws.upbound.io",
-		"lambda.aws.upbound.io",
-		"storage.gcp.upbound.io",
-		"compute.gcp.upbound.io",
-		"container.gcp.upbound.io",
-		"sql.gcp.upbound.io",
-		"iam.gcp.upbound.io",
-		"azure.upbound.io",
-		"network.azure.upbound.io",
-		"compute.azure.upbound.io",
-		"storage.azure.upbound.io",
+	group := extractGroup(apiVersion)
+
+	// Any upbound.io provider resource is a managed resource
+	if strings.HasSuffix(group, ".upbound.io") || group == "upbound.io" {
+		return true
 	}
-	for _, prefix := range providerPrefixes {
-		if strings.Contains(apiVersion, prefix) {
-			return true
-		}
+
+	// Legacy crossplane.io provider resources
+	if strings.Contains(group, ".aws.crossplane.io") ||
+		strings.Contains(group, ".gcp.crossplane.io") ||
+		strings.Contains(group, ".azure.crossplane.io") {
+		return true
 	}
-	return strings.Contains(apiVersion, ".aws.crossplane.io") ||
-		strings.Contains(apiVersion, ".gcp.crossplane.io") ||
-		strings.Contains(apiVersion, ".azure.crossplane.io")
+
+	return false
 }
 
 func isCompositeResource(apiVersion, kind string) bool {
-	// XRs typically have custom API groups and don't end in "Claim"
-	return strings.Contains(apiVersion, ".crossplane.io") &&
-		!strings.HasPrefix(apiVersion, "apiextensions.") &&
-		!strings.HasPrefix(apiVersion, "pkg.") &&
-		!strings.HasSuffix(kind, "Claim")
+	group := extractGroup(apiVersion)
+
+	// Skip core k8s and crossplane API groups
+	if isCoreKubernetesGroup(group) || isCrossplaneCoreGroup(group) {
+		return false
+	}
+
+	// Skip ArgoCD, Flux, and other non-Crossplane resources
+	if strings.Contains(group, "argoproj.io") ||
+		strings.Contains(group, "fluxcd.io") ||
+		strings.Contains(group, "kustomize.config.k8s.io") {
+		return false
+	}
+
+	// If it's an upbound.io resource, it's a managed resource not an XR
+	if strings.Contains(group, "upbound.io") {
+		return false
+	}
+
+	// Custom API groups with crossplane-style versioning are likely XRs
+	// e.g., platform.civica.cloud/v1alpha1, storage.example.org/v1alpha1
+	if strings.Contains(apiVersion, "/v1alpha1") ||
+		strings.Contains(apiVersion, "/v1beta1") ||
+		strings.Contains(apiVersion, "/v1beta2") ||
+		strings.Contains(apiVersion, "/v1") {
+		if !strings.HasSuffix(kind, "Claim") && group != "" && strings.Contains(group, ".") {
+			return true
+		}
+	}
+
+	return false
+}
+
+func extractGroup(apiVersion string) string {
+	parts := strings.SplitN(apiVersion, "/", 2)
+	if len(parts) == 2 {
+		return parts[0]
+	}
+	return ""
+}
+
+func isCoreKubernetesGroup(group string) bool {
+	coreGroups := []string{
+		"", "v1", "apps", "batch", "rbac.authorization.k8s.io",
+		"networking.k8s.io", "policy", "storage.k8s.io",
+		"admissionregistration.k8s.io", "certificates.k8s.io",
+		"coordination.k8s.io", "events.k8s.io", "discovery.k8s.io",
+		"node.k8s.io", "scheduling.k8s.io", "autoscaling",
+	}
+	for _, cg := range coreGroups {
+		if group == cg {
+			return true
+		}
+	}
+	return false
+}
+
+func isCrossplaneCoreGroup(group string) bool {
+	return strings.HasPrefix(group, "apiextensions.crossplane.io") ||
+		strings.HasPrefix(group, "pkg.crossplane.io")
 }
 
 func parseMultiDoc(data []byte) ([]unstructured.Unstructured, error) {
