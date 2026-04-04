@@ -1,0 +1,41 @@
+apiVersion: apiextensions.crossplane.io/v1
+kind: Composition
+metadata:
+  name: bucket-with-policy
+spec:
+  compositeTypeRef:
+    apiVersion: storage.example.org/v1alpha1
+    kind: XBucket
+  resources:
+    - name: s3-bucket
+      base:
+        apiVersion: s3.aws.upbound.io/v1beta1
+        kind: Bucket
+        spec:
+          forProvider:
+            region: us-east-1
+          providerConfigRef:
+            name: default
+      patches:
+        - type: FromCompositeFieldPath
+          fromFieldPath: spec.region
+          toFieldPath: spec.forProvider.region
+        - type: FromCompositeFieldPath
+          fromFieldPath: spec.bucketName
+          toFieldPath: metadata.name
+
+    - name: bucket-acl
+      base:
+        apiVersion: s3.aws.upbound.io/v1beta1
+        kind: BucketACL
+        spec:
+          forProvider:
+            acl: private
+            bucketSelector:
+              matchControllerRef: true
+          providerConfigRef:
+            name: default
+      patches:
+        - type: FromCompositeFieldPath
+          fromFieldPath: spec.acl
+          toFieldPath: spec.forProvider.acl

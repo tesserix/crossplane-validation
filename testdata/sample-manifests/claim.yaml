@@ -1,0 +1,10 @@
+apiVersion: storage.example.org/v1alpha1
+kind: XBucket
+metadata:
+  name: my-app-logs
+spec:
+  compositionRef:
+    name: bucket-with-policy
+  region: us-east-1
+  bucketName: my-app-logs-bucket
+  acl: private

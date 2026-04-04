@@ -1,0 +1,41 @@
+name: "Crossplane Validate"
+description: "Validate Crossplane resources before applying — like terraform plan for Crossplane"
+author: "tesserix"
+
+inputs:
+  manifests:
+    description: "Path to Crossplane manifests"
+    required: false
+    default: "."
+  base-branch:
+    description: "Base branch to compare against"
+    required: false
+    default: "main"
+  cloud-mode:
+    description: "Enable cloud-aware validation with OpenTofu"
+    required: false
+    default: "false"
+
+runs:
+  using: "composite"
+  steps:
+    - uses: actions/setup-go@v5
+      with:
+        go-version: "1.26"
+
+    - name: Build
+      shell: bash
+      run: |
+        cd ${{ github.action_path }}
+        go build -o /tmp/crossplane-validate ./cmd/crossplane-validate
+
+    - name: Validate
+      shell: bash
+      run: |
+        args="plan --base=${{ inputs.base-branch }} --target=HEAD"
+        args="$args --manifests=${{ inputs.manifests }}"
+        args="$args --output=markdown"
+        if [ "${{ inputs.cloud-mode }}" = "true" ]; then
+          args="$args --cloud"
+        fi
+        /tmp/crossplane-validate $args
