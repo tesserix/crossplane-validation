@@ -89,6 +89,8 @@ With --cloud, converts to HCL and runs OpenTofu plan with read-only credentials 
 
 			var cloudPlan *tofu.PlanResult
 			if cloudMode && cfg.HasCloudCredentials() {
+				fmt.Println("Loading provider schemas...")
+				hcl.UseSchemaLookup = true
 				fmt.Println("Converting to HCL...")
 				baseHCL, err := hcl.Convert(baseRendered, cfg.Providers)
 				if err != nil {

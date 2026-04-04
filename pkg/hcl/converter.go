@@ -116,12 +116,11 @@ func convertResource(r renderer.RenderedResource, providers map[string]config.Pr
 
 	attrs := extractForProvider(res)
 
-	// Terraform requires a 'name' attribute for most resources
 	if _, hasName := attrs["name"]; !hasName {
 		attrs["name"] = res.GetName()
 	}
 
-	importID := buildImportID(tfType, attrs, providers)
+	importID := resolveImportID(res, tfType, attrs, providers)
 
 	return Block{
 		Type:       "resource",
@@ -133,117 +132,159 @@ func convertResource(r renderer.RenderedResource, providers map[string]config.Pr
 	}, nil
 }
 
-// mapResourceType maps a Crossplane API version + kind to a Terraform resource type.
-// This leverages the 1:1 mapping that exists because Upjet generates Crossplane
-// providers from Terraform providers.
+// resolveImportID determines the cloud resource ID for terraform import.
+// Priority:
+//  1. crossplane.io/external-name annotation (set by Crossplane after creation)
+//  2. status.atProvider.id (if resource was fetched from cluster)
+//  3. Build from resource attributes and provider config
+func resolveImportID(res unstructured.Unstructured, tfType string, attrs map[string]interface{}, providers map[string]config.Provider) string {
+	// Check annotations for external-name (most reliable)
+	annotations := res.GetAnnotations()
+	if annotations != nil {
+		if externalName, ok := annotations["crossplane.io/external-name"]; ok && externalName != "" {
+			// For Azure, external-name is just the short name, not the full resource ID
+			// For AWS, it's often the resource ID directly
+			if strings.HasPrefix(tfType, "aws_") || strings.HasPrefix(tfType, "google_") {
+				return externalName
+			}
+		}
+	}
+
+	// Check status.atProvider.id (set when resource is observed from cluster)
+	atProviderID, found, _ := unstructured.NestedString(res.Object, "status", "atProvider", "id")
+	if found && atProviderID != "" {
+		return atProviderID
+	}
+
+	// Fall back to building from attributes
+	return buildImportID(tfType, attrs, providers)
+}
+
+// UseSchemaLookup controls whether mapResourceType queries the Terraform provider
+// schema at runtime. When true (set during --cloud mode), it downloads the provider
+// schema and matches resource types dynamically — no hardcoded mappings needed.
+// When false (default for offline mode), it uses convention-based derivation with
+// overrides for known exceptions.
+var UseSchemaLookup bool
+
 func mapResourceType(apiVersion, kind string) (string, error) {
-	// Upbound provider-aws mappings
-	awsMappings := map[string]map[string]string{
-		"s3.aws.upbound.io": {
-			"Bucket":          "aws_s3_bucket",
-			"BucketPolicy":    "aws_s3_bucket_policy",
-			"BucketACL":       "aws_s3_bucket_acl",
-			"BucketVersioning": "aws_s3_bucket_versioning",
-		},
-		"iam.aws.upbound.io": {
-			"Role":             "aws_iam_role",
-			"RolePolicy":       "aws_iam_role_policy",
-			"RolePolicyAttachment": "aws_iam_role_policy_attachment",
-			"Policy":           "aws_iam_policy",
-			"User":             "aws_iam_user",
-			"Group":            "aws_iam_group",
-		},
-		"ec2.aws.upbound.io": {
-			"VPC":              "aws_vpc",
-			"Subnet":           "aws_subnet",
-			"SecurityGroup":    "aws_security_group",
-			"Instance":         "aws_instance",
-			"InternetGateway":  "aws_internet_gateway",
-			"RouteTable":       "aws_route_table",
-			"NATGateway":       "aws_nat_gateway",
-			"EIP":              "aws_eip",
-		},
-		"rds.aws.upbound.io": {
-			"Instance":         "aws_db_instance",
-			"Cluster":          "aws_rds_cluster",
-			"SubnetGroup":      "aws_db_subnet_group",
-		},
-		"eks.aws.upbound.io": {
-			"Cluster":          "aws_eks_cluster",
-			"NodeGroup":        "aws_eks_node_group",
-		},
-	}
-
-	// Upbound provider-gcp mappings
-	gcpMappings := map[string]map[string]string{
-		"storage.gcp.upbound.io": {
-			"Bucket": "google_storage_bucket",
-		},
-		"compute.gcp.upbound.io": {
-			"Instance":  "google_compute_instance",
-			"Network":   "google_compute_network",
-			"Subnetwork": "google_compute_subnetwork",
-			"Firewall":  "google_compute_firewall",
-		},
-		"container.gcp.upbound.io": {
-			"Cluster":  "google_container_cluster",
-			"NodePool": "google_container_node_pool",
-		},
-		"sql.gcp.upbound.io": {
-			"DatabaseInstance": "google_sql_database_instance",
-			"Database":         "google_sql_database",
-			"User":             "google_sql_user",
-		},
-		"iam.gcp.upbound.io": {
-			"ServiceAccount": "google_service_account",
-		},
-	}
-
-	// Azure mappings
-	azureMappings := map[string]map[string]string{
-		"azure.upbound.io": {
-			"ResourceGroup": "azurerm_resource_group",
-		},
-		"storage.azure.upbound.io": {
-			"Account":   "azurerm_storage_account",
-			"Container": "azurerm_storage_container",
-		},
-		"network.azure.upbound.io": {
-			"VirtualNetwork": "azurerm_virtual_network",
-			"Subnet":         "azurerm_subnet",
-		},
-		"compute.azure.upbound.io": {
-			"LinuxVirtualMachine": "azurerm_linux_virtual_machine",
-		},
-	}
-
 	group := extractAPIGroup(apiVersion)
 
-	// Search in order: AWS, GCP, Azure
-	for prefix, kinds := range awsMappings {
-		if strings.HasPrefix(group, prefix) {
-			if tfType, ok := kinds[kind]; ok {
-				return tfType, nil
-			}
-		}
+	// Fast path: check overrides
+	overrideKey := group + "/" + kind
+	if tfType, ok := resourceTypeOverrides[overrideKey]; ok {
+		return tfType, nil
 	}
-	for prefix, kinds := range gcpMappings {
-		if strings.HasPrefix(group, prefix) {
-			if tfType, ok := kinds[kind]; ok {
-				return tfType, nil
-			}
-		}
-	}
-	for prefix, kinds := range azureMappings {
-		if strings.HasPrefix(group, prefix) {
-			if tfType, ok := kinds[kind]; ok {
-				return tfType, nil
+
+	// Schema-based lookup: query the actual Terraform provider for its resource types
+	if UseSchemaLookup {
+		provider, source := providerForGroup(group)
+		if provider != "" {
+			service := strings.Split(group, ".")[0]
+			if schema, err := LoadProviderSchema(provider, source); err == nil {
+				if tfType := schema.MatchResourceType(kind, service); tfType != "" {
+					return tfType, nil
+				}
 			}
 		}
 	}
 
-	// Fallback: generate a best-guess name
-	return guessTerraformType(group, kind), nil
+	return deriveResourceType(group, kind), nil
+}
+
+func providerForGroup(group string) (string, string) {
+	switch {
+	case strings.Contains(group, "aws.upbound.io"), strings.Contains(group, "aws.crossplane.io"):
+		return "aws", "hashicorp/aws"
+	case strings.Contains(group, "gcp.upbound.io"), strings.Contains(group, "gcp.crossplane.io"):
+		return "google", "hashicorp/google"
+	case strings.Contains(group, "azure.upbound.io"), strings.Contains(group, "azure.crossplane.io"):
+		return "azurerm", "hashicorp/azurerm"
+	case strings.Contains(group, "azuread.upbound.io"):
+		return "azuread", "hashicorp/azuread"
+	case strings.Contains(group, "datadog.upbound.io"):
+		return "datadog", "datadog/datadog"
+	}
+	return "", ""
+}
+
+// Overrides for resources where the Terraform name doesn't follow the convention.
+// Only add entries here when the automatic derivation produces the wrong name.
+// Overrides for resources where the automatic derivation doesn't match Terraform's naming.
+// The convention-based derivation handles most cases, but Terraform naming is inconsistent
+// in some areas (e.g., ec2 resources drop the "ec2" prefix, rds uses "db" prefix).
+// Add entries here ONLY when the automatic derivation produces the wrong name.
+var resourceTypeOverrides = map[string]string{
+	// AWS: ec2 resources drop the service prefix in Terraform
+	"ec2.aws.upbound.io/VPC":             "aws_vpc",
+	"ec2.aws.upbound.io/Subnet":          "aws_subnet",
+	"ec2.aws.upbound.io/SecurityGroup":    "aws_security_group",
+	"ec2.aws.upbound.io/Instance":         "aws_instance",
+	"ec2.aws.upbound.io/InternetGateway":  "aws_internet_gateway",
+	"ec2.aws.upbound.io/RouteTable":       "aws_route_table",
+	"ec2.aws.upbound.io/NATGateway":       "aws_nat_gateway",
+	"ec2.aws.upbound.io/EIP":              "aws_eip",
+	// AWS: rds uses "db" prefix
+	"rds.aws.upbound.io/Instance":         "aws_db_instance",
+	"rds.aws.upbound.io/Cluster":          "aws_rds_cluster",
+	"rds.aws.upbound.io/SubnetGroup":      "aws_db_subnet_group",
+
+	// GCP: iam service account drops prefix
+	"iam.gcp.upbound.io/ServiceAccount":   "google_service_account",
+
+	// Azure: network resources drop the service prefix
+	"azure.upbound.io/ResourceGroup":      "azurerm_resource_group",
+	"storage.azure.upbound.io/Account":    "azurerm_storage_account",
+	"storage.azure.upbound.io/Container":  "azurerm_storage_container",
+	"network.azure.upbound.io/VirtualNetwork": "azurerm_virtual_network",
+	"network.azure.upbound.io/Subnet":     "azurerm_subnet",
+	"compute.azure.upbound.io/LinuxVirtualMachine":   "azurerm_linux_virtual_machine",
+	"compute.azure.upbound.io/WindowsVirtualMachine": "azurerm_windows_virtual_machine",
+	"containerservice.azure.upbound.io/KubernetesCluster": "azurerm_kubernetes_cluster",
+	"managedidentity.azure.upbound.io/UserAssignedIdentity": "azurerm_user_assigned_identity",
+	"keyvault.azure.upbound.io/Vault":     "azurerm_key_vault",
+	"authorization.azure.upbound.io/RoleAssignment":  "azurerm_role_assignment",
+	"authorization.azure.upbound.io/RoleDefinition":  "azurerm_role_definition",
+}
+
+func deriveResourceType(group, kind string) string {
+	snakeKind := camelToSnake(kind)
+
+	switch {
+	case strings.HasSuffix(group, ".aws.upbound.io") || strings.HasSuffix(group, ".aws.crossplane.io"):
+		service := strings.Split(group, ".")[0]
+		return "aws_" + service + "_" + snakeKind
+
+	case strings.HasSuffix(group, ".gcp.upbound.io") || strings.HasSuffix(group, ".gcp.crossplane.io"):
+		service := strings.Split(group, ".")[0]
+		return "google_" + service + "_" + snakeKind
+
+	case strings.HasSuffix(group, ".azure.upbound.io") || strings.HasSuffix(group, ".azure.crossplane.io"):
+		service := strings.Split(group, ".")[0]
+		if service == "azure" {
+			return "azurerm_" + snakeKind
+		}
+		return "azurerm_" + service + "_" + snakeKind
+
+	case group == "azure.upbound.io":
+		return "azurerm_" + snakeKind
+
+	default:
+		return guessProvider(group) + "_" + snakeKind
+	}
+}
+
+func guessProvider(group string) string {
+	switch {
+	case strings.Contains(group, "aws"):
+		return "aws"
+	case strings.Contains(group, "gcp"):
+		return "google"
+	case strings.Contains(group, "azure"):
+		return "azurerm"
+	default:
+		return "unknown"
+	}
 }
 
 func extractForProvider(res unstructured.Unstructured) map[string]interface{} {
@@ -294,12 +335,19 @@ func flattenForTerraform(m map[string]interface{}) map[string]interface{} {
 
 func camelToSnake(s string) string {
 	var result strings.Builder
-	for i, r := range s {
+	runes := []rune(s)
+	for i, r := range runes {
 		if r >= 'A' && r <= 'Z' {
 			if i > 0 {
-				result.WriteRune('_')
+				prev := runes[i-1]
+				nextIsLower := i+1 < len(runes) && runes[i+1] >= 'a' && runes[i+1] <= 'z'
+				if prev >= 'a' && prev <= 'z' {
+					result.WriteRune('_')
+				} else if prev >= 'A' && prev <= 'Z' && nextIsLower {
+					result.WriteRune('_')
+				}
 			}
-			result.WriteRune(r + 32) // toLower
+			result.WriteRune(r + 32)
 		} else {
 			result.WriteRune(r)
 		}
@@ -345,42 +393,23 @@ func providerSource(name string) string {
 	}
 }
 
+// buildImportID constructs a cloud resource ID from attributes and provider config.
+// This is the fallback when no external-name annotation or status.atProvider.id is available.
 func buildImportID(tfType string, attrs map[string]interface{}, providers map[string]config.Provider) string {
-	subscriptionID := ""
-	for name, prov := range providers {
-		if strings.ToLower(name) == "azure" && prov.SubscriptionID != "" {
-			subscriptionID = prov.SubscriptionID
-		}
-	}
-
-	rg, _ := attrs["resource_group_name"].(string)
 	name, _ := attrs["name"].(string)
 
-	switch tfType {
-	case "azurerm_storage_account":
-		if subscriptionID != "" && rg != "" && name != "" {
-			return fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Storage/storageAccounts/%s",
-				subscriptionID, rg, name)
+	switch {
+	case strings.HasPrefix(tfType, "azurerm_"):
+		return buildAzureImportID(tfType, attrs, providers)
+	case strings.HasPrefix(tfType, "aws_"):
+		if name != "" {
+			return name
 		}
-	case "azurerm_resource_group":
-		if subscriptionID != "" && name != "" {
-			return fmt.Sprintf("/subscriptions/%s/resourceGroups/%s", subscriptionID, name)
+	case strings.HasPrefix(tfType, "google_"):
+		project, _ := attrs["project"].(string)
+		if project != "" && name != "" {
+			return project + "/" + name
 		}
-	case "azurerm_virtual_network":
-		if subscriptionID != "" && rg != "" && name != "" {
-			return fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Network/virtualNetworks/%s",
-				subscriptionID, rg, name)
-		}
-	case "azurerm_subnet":
-		vnet, _ := attrs["virtual_network_name"].(string)
-		if subscriptionID != "" && rg != "" && vnet != "" && name != "" {
-			return fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Network/virtualNetworks/%s/subnets/%s",
-				subscriptionID, rg, vnet, name)
-		}
-	}
-
-	// AWS resources use name/id directly
-	if strings.HasPrefix(tfType, "aws_") {
 		if name != "" {
 			return name
 		}
@@ -389,17 +418,147 @@ func buildImportID(tfType string, attrs map[string]interface{}, providers map[st
 	return ""
 }
 
-func guessTerraformType(group, kind string) string {
-	// Best-effort: extract provider prefix from group and combine with snake_case kind
-	provider := "unknown"
-	if strings.Contains(group, "aws") {
-		provider = "aws"
-	} else if strings.Contains(group, "gcp") {
-		provider = "google"
-	} else if strings.Contains(group, "azure") {
-		provider = "azurerm"
+// azureProviderMapping maps Terraform resource prefixes to Azure Resource Manager provider paths.
+// The Terraform type `azurerm_<service>_<resource>` maps to `Microsoft.<Provider>/<resourceType>`.
+// This uses the Terraform prefix (after "azurerm_") to derive the ARM provider namespace.
+var azureServiceToARM = map[string]string{
+	"storage":          "Microsoft.Storage",
+	"network":          "Microsoft.Network",
+	"compute":          "Microsoft.Compute",
+	"kubernetes":       "Microsoft.ContainerService",
+	"container":        "Microsoft.ContainerService",
+	"key_vault":        "Microsoft.KeyVault",
+	"role":             "Microsoft.Authorization",
+	"user_assigned":    "Microsoft.ManagedIdentity",
+	"managed_identity": "Microsoft.ManagedIdentity",
+	"sql":              "Microsoft.Sql",
+	"cosmosdb":         "Microsoft.DocumentDB",
+	"redis":            "Microsoft.Cache",
+	"servicebus":       "Microsoft.ServiceBus",
+	"eventhub":         "Microsoft.EventHub",
+	"monitor":          "Microsoft.Insights",
+	"log_analytics":    "Microsoft.OperationalInsights",
+	"app_service":      "Microsoft.Web",
+	"function_app":     "Microsoft.Web",
+	"dns":              "Microsoft.Network",
+	"private_dns":      "Microsoft.Network",
+	"lb":               "Microsoft.Network",
+	"public_ip":        "Microsoft.Network",
+	"firewall":         "Microsoft.Network",
+}
+
+func buildAzureImportID(tfType string, attrs map[string]interface{}, providers map[string]config.Provider) string {
+	subscriptionID := ""
+	for pName, prov := range providers {
+		if strings.ToLower(pName) == "azure" && prov.SubscriptionID != "" {
+			subscriptionID = prov.SubscriptionID
+		}
 	}
-	return provider + "_" + camelToSnake(kind)
+	if subscriptionID == "" {
+		return ""
+	}
+
+	rg, _ := attrs["resource_group_name"].(string)
+	name, _ := attrs["name"].(string)
+
+	// Resource groups are a special case — they don't have a parent RG
+	if tfType == "azurerm_resource_group" && name != "" {
+		return "/subscriptions/" + subscriptionID + "/resourceGroups/" + name
+	}
+
+	if rg == "" || name == "" {
+		return ""
+	}
+
+	// Strip "azurerm_" prefix and find the ARM provider namespace
+	tfSuffix := strings.TrimPrefix(tfType, "azurerm_")
+
+	// Try to match service prefix → ARM namespace
+	armNamespace := ""
+	for prefix, ns := range azureServiceToARM {
+		if strings.HasPrefix(tfSuffix, prefix) {
+			armNamespace = ns
+			break
+		}
+	}
+	if armNamespace == "" {
+		return ""
+	}
+
+	// Convert Terraform type to ARM resource type name (PascalCase, plural)
+	armResourceType := tfSuffixToARMType(tfSuffix)
+
+	return fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/%s/%s/%s",
+		subscriptionID, rg, armNamespace, armResourceType, name)
+}
+
+// tfSuffixToARMType converts a Terraform suffix like "storage_account" to ARM resource type "storageAccounts".
+func tfSuffixToARMType(suffix string) string {
+	// Common Terraform→ARM resource type mappings that don't follow simple pluralization
+	knownMappings := map[string]string{
+		"storage_account":        "storageAccounts",
+		"storage_container":      "storageAccounts/blobServices/default/containers",
+		"virtual_network":        "virtualNetworks",
+		"subnet":                 "virtualNetworks/subnets",
+		"network_interface":      "networkInterfaces",
+		"public_ip":              "publicIPAddresses",
+		"network_security_group": "networkSecurityGroups",
+		"kubernetes_cluster":     "managedClusters",
+		"key_vault":              "vaults",
+		"key_vault_secret":       "vaults/secrets",
+		"role_assignment":        "roleAssignments",
+		"role_definition":        "roleDefinitions",
+		"user_assigned_identity": "userAssignedIdentities",
+		"linux_virtual_machine":  "virtualMachines",
+		"windows_virtual_machine": "virtualMachines",
+		"sql_server":             "servers",
+		"sql_database":           "servers/databases",
+	}
+
+	if armType, ok := knownMappings[suffix]; ok {
+		return armType
+	}
+
+	// Fallback: convert snake_case to camelCase and pluralize
+	parts := strings.Split(suffix, "_")
+	// Remove the service prefix (first part) since it's already in the ARM namespace
+	if len(parts) > 1 {
+		// Find where the actual resource type starts (skip the service prefix)
+		for servicePrefix := range azureServiceToARM {
+			prefixParts := strings.Split(servicePrefix, "_")
+			if len(prefixParts) <= len(parts) {
+				match := true
+				for i, pp := range prefixParts {
+					if parts[i] != pp {
+						match = false
+						break
+					}
+				}
+				if match {
+					parts = parts[len(prefixParts):]
+					break
+				}
+			}
+		}
+	}
+
+	result := ""
+	for i, p := range parts {
+		if i == 0 {
+			result += p
+		} else {
+			result += strings.ToUpper(p[:1]) + p[1:]
+		}
+	}
+	if !strings.HasSuffix(result, "s") {
+		result += "s"
+	}
+	return result
+}
+
+// guessTerraformType is kept for backward compatibility with tests
+func guessTerraformType(group, kind string) string {
+	return deriveResourceType(group, kind)
 }
 
 var mapStyleFields = map[string]bool{

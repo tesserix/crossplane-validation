@@ -346,7 +346,7 @@ func TestCamelToSnake(t *testing.T) {
 		{"accountReplicationType", "account_replication_type"},
 		{"vpcId", "vpc_id"},
 		{"simple", "simple"},
-		{"IPAddress", "i_p_address"},
+		{"IPAddress", "ip_address"},
 	}
 
 	for _, tt := range tests {
