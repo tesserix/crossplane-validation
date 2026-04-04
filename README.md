@@ -4,6 +4,7 @@
   <img src="https://img.shields.io/github/license/tesserix/crossplane-validation?style=flat-square" alt="License">
   <img src="https://img.shields.io/github/go-mod/go-version/tesserix/crossplane-validation?style=flat-square" alt="Go Version">
   <img src="https://img.shields.io/badge/crossplane-compatible-blueviolet?style=flat-square" alt="Crossplane Compatible">
+  <img src="https://img.shields.io/badge/multi--cloud-AWS%20%7C%20GCP%20%7C%20Azure-orange?style=flat-square" alt="Multi-Cloud">
 </p>
 
 # crossplane-validate
@@ -48,9 +49,11 @@ It runs locally on your machine, in CI on every PR, or both. No cluster required
 | Feature | Description |
 |---|---|
 | **Git-based diff** | Compares manifests between branches — shows what a PR will change |
-| **Cloud-aware plan** | Optional: converts to HCL and runs OpenTofu for real cloud-state diff |
+| **Cloud-aware plan** | Converts to HCL and runs Terraform/OpenTofu for real cloud-state diff |
+| **Dynamic provider schema** | Queries Terraform provider schema at runtime — no hardcoded resource mappings |
+| **Multi-cloud** | AWS, GCP, Azure, Azure AD, Datadog — auto-detected from your manifests |
 | **Composition rendering** | Renders Patch-and-Transform and Function Pipeline compositions offline |
-| **Multi-provider** | AWS, GCP, Azure — with automatic provider detection |
+| **Resource discovery** | Recursive scan of any directory to find all Crossplane resources |
 | **PR comments** | Markdown output designed for GitHub PR comments |
 | **Zero dependencies** | Single static binary. No Docker, no cluster, no Helm |
 | **Homebrew** | `brew install tesserix/tap/crossplane-validate` |
@@ -112,6 +115,34 @@ crossplane-validate --version
 
 ## Usage
 
+### Scan — discover Crossplane resources
+
+Recursively find and classify all Crossplane resources in a directory:
+
+```bash
+crossplane-validate scan ./crossplane/
+```
+
+```
+Scanned: ./crossplane/
+
+XRDs (32)
+  CompositeResourceDefinition/xsandboxes.platform.example.com  apiextensions.crossplane.io/v1
+  CompositeResourceDefinition/xnetworks.platform.example.com   apiextensions.crossplane.io/v1
+  ...
+
+Compositions (32)
+  Composition/xsandbox.composition.v1   apiextensions.crossplane.io/v1
+  ...
+
+Managed Resources (10)
+  Application/platform-apps-prod        applications.azuread.upbound.io/v1beta1
+  DashboardJSON/monitoring-dashboard    datadog.upbound.io/v1alpha1
+  ...
+
+Total: 184 resources
+```
+
 ### Plan — see what will change
 
 Compare your working directory against the `main` branch:
@@ -148,13 +179,28 @@ crossplane-validate diff ./crossplane/
 
 ### Cloud-aware plan
 
-For deeper validation, add the `--cloud` flag. This converts your Crossplane resources to HCL and runs OpenTofu with read-only credentials to show the actual cloud impact:
+For deeper validation, add the `--cloud` flag. This dynamically queries the Terraform provider schema, converts your Crossplane resources to HCL, imports existing cloud resources, and runs a real Terraform plan:
 
 ```bash
 crossplane-validate plan --manifests=./crossplane/ --cloud
 ```
 
-This requires a `.crossplane-validate.yml` config with credentials (see [Configuration](#configuration)).
+```
+Loading provider schemas...        # downloads schema for detected providers
+Converting to HCL...               # converts Crossplane MRs → Terraform resources
+Importing azurerm_storage_account.myapp...  # imports existing resource from Azure
+Import successful!
+
+  ~ azurerm_storage_account.myapp will be updated in-place
+      ~ account_replication_type: "LRS" -> "GRS"
+      ~ allow_nested_items_to_be_public: true -> false
+      ~ tags: {Environment:devtest} → {Environment:production, CostCenter:engineering}
+
+Plan: 0 to add, 1 to change, 0 to destroy
+Cloud: 0 to add, 1 to change, 0 to destroy
+```
+
+This requires Terraform or OpenTofu installed and cloud credentials available (see [Configuration](#configuration)).
 
 ---
 
@@ -181,10 +227,10 @@ This requires a `.crossplane-validate.yml` config with credentials (see [Configu
     │   Git Diff Engine │          │  HCL Converter     │
     │   (always runs)   │          │  (--cloud only)    │
     │                   │          │                    │
-    │  main vs feature  │          │  MR → Terraform    │
-    │  field-level diff │          │  OpenTofu plan     │
-    └─────────┬─────────┘          └─────────┬─────────┘
-              │                               │
+    │  main vs feature  │          │  Provider schema   │
+    │  field-level diff │          │  → dynamic mapping │
+    └─────────┬─────────┘          │  → terraform plan  │
+              │                    └─────────┬─────────┘
               └───────────┬───────────────────┘
                           │
                 ┌─────────┴─────────┐
@@ -196,7 +242,29 @@ This requires a `.crossplane-validate.yml` config with credentials (see [Configu
 
 **By default**, the tool performs a git-based diff. It renders manifests from both branches and diffs the output. Fast, offline, no credentials needed.
 
-**With `--cloud`**, it goes deeper. It converts Crossplane managed resources to equivalent Terraform HCL (the mapping is 1:1 because Crossplane's Upjet providers are generated from Terraform providers) and runs OpenTofu plan with read-only credentials to show what will actually change in your cloud.
+**With `--cloud`**, it goes deeper:
+1. Auto-detects which cloud providers are used from your manifests
+2. Queries `terraform providers schema -json` to get the full resource type catalog (1,000+ types per provider)
+3. Dynamically maps Crossplane kinds to Terraform resource types
+4. Imports existing cloud resources into Terraform state
+5. Runs `terraform plan` to show the real cloud impact with field-level diffs
+
+---
+
+## Multi-Cloud Support
+
+Providers are **auto-detected** from your manifests. If your directory contains AWS, GCP, and Azure resources, all three providers are included automatically.
+
+| Provider | Auto-detected from | Terraform provider |
+|---|---|---|
+| AWS | `*.aws.upbound.io` | `hashicorp/aws` |
+| GCP | `*.gcp.upbound.io` | `hashicorp/google` |
+| Azure | `*.azure.upbound.io` | `hashicorp/azurerm` |
+| Azure AD | `*.azuread.upbound.io` | `hashicorp/azuread` |
+| Datadog | `*.datadog.upbound.io` | `datadog/datadog` |
+| Any Upjet provider | `*.<name>.upbound.io` | Derived dynamically |
+
+Resource type mapping in `--cloud` mode is **fully dynamic** — it queries the actual Terraform provider schema at runtime instead of relying on hardcoded mappings. This means new resources added to providers work automatically without CLI updates.
 
 ---
 
@@ -223,7 +291,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: tesserix/crossplane-validation@v0.1.0
+      - uses: tesserix/crossplane-validation@v0.7.0
         with:
           manifests: ./crossplane/
 ```
@@ -232,7 +300,7 @@ jobs:
 
 | Input | Default | Description |
 |---|---|---|
-| `version` | `latest` | Version to install (e.g., `v0.1.0`) |
+| `version` | `latest` | Version to install (e.g., `v0.7.0`) |
 | `manifests` | `.` | Path to Crossplane manifests |
 | `base-branch` | `main` | Branch to compare against |
 | `cloud-mode` | `false` | Enable cloud-aware plan |
@@ -310,62 +378,30 @@ manifests:
   - infra/crossplane/
 
 # Cloud provider credentials for --cloud mode
+# Providers are auto-detected from manifests — only add entries
+# here if you need to pass specific config (region, project, subscription).
 providers:
   aws:
-    credentials: env          # reads from AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
+    credentials: env
     region: us-east-1
   gcp:
-    credentials: env          # reads from GOOGLE_APPLICATION_CREDENTIALS
+    credentials: env
     project: my-project
   azure:
-    credentials: env          # reads from ARM_CLIENT_ID / ARM_CLIENT_SECRET / ARM_TENANT_ID
+    credentials: env
+    subscription-id: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 
 # Optional settings
 settings:
   timeout: 10m
-  diff-format: terraform      # "terraform" or "yaml"
+  diff-format: terraform
   ignore-fields:
     - metadata.resourceVersion
     - metadata.uid
     - status.conditions
 ```
 
-Without a config file, `crossplane-validate` uses sensible defaults and scans the current directory.
-
----
-
-## Supported Resources
-
-### AWS (provider-aws)
-
-| Service | Resources |
-|---|---|
-| **S3** | Bucket, BucketPolicy, BucketACL, BucketVersioning |
-| **IAM** | Role, RolePolicy, RolePolicyAttachment, Policy, User, Group |
-| **EC2** | VPC, Subnet, SecurityGroup, Instance, InternetGateway, RouteTable, NATGateway, EIP |
-| **RDS** | Instance, Cluster, SubnetGroup |
-| **EKS** | Cluster, NodeGroup |
-
-### GCP (provider-gcp)
-
-| Service | Resources |
-|---|---|
-| **Compute** | Instance, Network, Subnetwork, Firewall |
-| **GKE** | Cluster, NodePool |
-| **Cloud SQL** | DatabaseInstance, Database, User |
-| **Storage** | Bucket |
-| **IAM** | ServiceAccount |
-
-### Azure (provider-azure)
-
-| Service | Resources |
-|---|---|
-| **Resources** | ResourceGroup |
-| **Network** | VirtualNetwork, Subnet |
-| **Storage** | Account, Container |
-| **Compute** | LinuxVirtualMachine |
-
-Additional resources are detected automatically via Crossplane API group conventions. Unmapped resources fall back to best-effort naming.
+Without a config file, `crossplane-validate` uses sensible defaults and scans the current directory. Providers are auto-detected from the manifests regardless of whether a config file exists.
 
 ---
 
@@ -375,7 +411,7 @@ Additional resources are detected automatically via Crossplane API group convent
 |---|---|
 | **Git** | Always required (for branch comparison) |
 | **Go 1.26+** | Only if building from source |
-| **OpenTofu or Terraform** | Only for `--cloud` mode |
+| **Terraform or OpenTofu** | Only for `--cloud` mode |
 | **Cloud credentials** | Only for `--cloud` mode (read-only recommended) |
 
 For basic validation, all you need is the binary and a git repo.
@@ -421,9 +457,31 @@ $ crossplane-validate plan --manifests=./crossplane/
 Plan: 0 to add, 1 to change, 0 to destroy
 ```
 
-### Deletion detection
+### Cloud-aware plan (real Terraform diff)
 
-When a manifest is removed from the feature branch:
+```
+$ crossplane-validate plan --cloud --manifests=./crossplane/
+
+═══ Structural Changes ═══
+
+  ~ Account/stcpvalidatecloud01
+      ~ spec.forProvider.accountReplicationType: LRS → GRS
+      + spec.forProvider.allowNestedItemsToBePublic: false
+      + spec.forProvider.tags.CostCenter: platform-engineering
+      ~ spec.forProvider.tags.Environment: devtest → production
+
+═══ Cloud Impact ═══
+
+  ~ azurerm_storage_account.stcpvalidatecloud01
+      ~ account_replication_type: LRS → GRS
+      ~ allow_nested_items_to_be_public: true → false
+      ~ tags: {Environment:devtest ...} → {environment:production, cost_center:platform-engineering ...}
+
+Plan: 0 to add, 1 to change, 0 to destroy
+Cloud: 0 to add, 1 to change, 0 to destroy
+```
+
+### Deletion detection
 
 ```
 $ crossplane-validate plan --manifests=./crossplane/
@@ -443,13 +501,13 @@ $ crossplane-validate plan --manifests=./crossplane/
 
 ═══ Structural Changes ═══
 
-  + Bucket/logs-bucket
+  + Bucket/logs-bucket                    (AWS)
       + spec.forProvider.region: us-east-1
 
-  ~ DatabaseInstance/app-db
+  ~ DatabaseInstance/app-db               (GCP)
       ~ spec.forProvider.tier: db-f1-micro → db-n1-standard-2
 
-  - ResourceGroup/old-rg
+  - ResourceGroup/old-rg                  (Azure)
 
 Plan: 1 to add, 1 to change, 1 to destroy
 ```
@@ -463,12 +521,12 @@ crossplane-validation/
 ├── cmd/crossplane-validate/     # CLI entry point
 ├── pkg/
 │   ├── config/                  # Configuration loading
-│   ├── manifest/                # YAML scanner and classifier
+│   ├── manifest/                # YAML scanner and resource classifier
 │   ├── renderer/                # Composition rendering engine
 │   ├── diff/                    # Structural diff computation
-│   ├── hcl/                     # Crossplane → Terraform HCL converter
-│   ├── plan/                    # Plan output rendering
-│   └── tofu/                    # OpenTofu integration
+│   ├── hcl/                     # Crossplane → HCL converter + schema lookup
+│   ├── plan/                    # Plan output rendering (terminal, markdown, JSON)
+│   └── tofu/                    # Terraform/OpenTofu integration
 ├── internal/git/                # Git operations
 ├── testdata/                    # Test manifests (AWS, GCP, Azure)
 ├── .github/
@@ -477,11 +535,25 @@ crossplane-validation/
 │   ├── CODEOWNERS               # Required reviewers
 │   └── pull_request_template.md
 ├── action.yml                   # GitHub Action definition
+├── ROADMAP.md                   # Planned features
 ├── LICENSE                      # Apache 2.0
 ├── CONTRIBUTING.md
 ├── CODE_OF_CONDUCT.md
 └── SECURITY.md
 ```
+
+---
+
+## Roadmap
+
+See [ROADMAP.md](ROADMAP.md) for planned features including:
+
+- Additional provider support (Cloudflare, DigitalOcean, MongoDB Atlas, Vault, etc.)
+- Policy engine (OPA/Rego)
+- Cost estimation
+- Drift detection
+- ArgoCD pre-sync integration
+- Docker image and Krew plugin
 
 ---
 
