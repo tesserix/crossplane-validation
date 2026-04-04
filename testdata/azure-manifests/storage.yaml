@@ -1,0 +1,27 @@
+apiVersion: storage.azure.upbound.io/v1beta2
+kind: Account
+metadata:
+  name: appdata
+spec:
+  forProvider:
+    resourceGroupNameRef:
+      name: app-rg
+    location: eastus
+    accountTier: Standard
+    accountReplicationType: GRS
+    tags:
+      Environment: production
+  providerConfigRef:
+    name: default
+---
+apiVersion: storage.azure.upbound.io/v1beta1
+kind: Container
+metadata:
+  name: uploads
+spec:
+  forProvider:
+    storageAccountNameRef:
+      name: appdata
+    containerAccessType: private
+  providerConfigRef:
+    name: default

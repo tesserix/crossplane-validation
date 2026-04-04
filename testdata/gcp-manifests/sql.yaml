@@ -1,0 +1,49 @@
+apiVersion: sql.gcp.upbound.io/v1beta2
+kind: DatabaseInstance
+metadata:
+  name: app-db
+spec:
+  forProvider:
+    region: asia-south1
+    project: my-gcp-project
+    databaseVersion: POSTGRES_16
+    settings:
+      - tier: db-custom-4-16384
+        diskSize: 50
+        diskType: PD_SSD
+        ipConfiguration:
+          - privateNetworkRef:
+              name: main-network
+            ipv4Enabled: false
+    deletionProtection: false
+  providerConfigRef:
+    name: default
+---
+apiVersion: sql.gcp.upbound.io/v1beta1
+kind: Database
+metadata:
+  name: app-database
+spec:
+  forProvider:
+    instanceRef:
+      name: app-db
+    project: my-gcp-project
+    charset: UTF8
+  providerConfigRef:
+    name: default
+---
+apiVersion: sql.gcp.upbound.io/v1beta1
+kind: User
+metadata:
+  name: app-user
+spec:
+  forProvider:
+    instanceRef:
+      name: app-db
+    project: my-gcp-project
+    passwordSecretRef:
+      name: db-password
+      namespace: crossplane-system
+      key: password
+  providerConfigRef:
+    name: default

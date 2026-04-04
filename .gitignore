@@ -1,0 +1,4 @@
+crossplane-validate
+*.exe
+dist/
+.crossplane-validate.yml

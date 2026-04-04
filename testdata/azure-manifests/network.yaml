@@ -1,0 +1,43 @@
+apiVersion: azure.upbound.io/v1beta1
+kind: ResourceGroup
+metadata:
+  name: app-rg
+spec:
+  forProvider:
+    location: eastus
+    tags:
+      Environment: production
+      Team: platform
+  providerConfigRef:
+    name: default
+---
+apiVersion: network.azure.upbound.io/v1beta2
+kind: VirtualNetwork
+metadata:
+  name: app-vnet
+spec:
+  forProvider:
+    resourceGroupNameRef:
+      name: app-rg
+    location: eastus
+    addressSpace:
+      - 10.0.0.0/16
+    tags:
+      Environment: production
+  providerConfigRef:
+    name: default
+---
+apiVersion: network.azure.upbound.io/v1beta2
+kind: Subnet
+metadata:
+  name: app-subnet
+spec:
+  forProvider:
+    resourceGroupNameRef:
+      name: app-rg
+    virtualNetworkNameRef:
+      name: app-vnet
+    addressPrefixes:
+      - 10.0.1.0/24
+  providerConfigRef:
+    name: default

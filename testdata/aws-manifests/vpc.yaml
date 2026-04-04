@@ -1,0 +1,45 @@
+apiVersion: ec2.aws.upbound.io/v1beta1
+kind: VPC
+metadata:
+  name: main-vpc
+spec:
+  forProvider:
+    region: us-east-1
+    cidrBlock: 10.0.0.0/16
+    enableDnsHostnames: true
+    enableDnsSupport: true
+    tags:
+      Name: main-vpc
+      Environment: production
+  providerConfigRef:
+    name: default
+---
+apiVersion: ec2.aws.upbound.io/v1beta1
+kind: Subnet
+metadata:
+  name: private-subnet-1a
+spec:
+  forProvider:
+    region: us-east-1
+    vpcIdRef:
+      name: main-vpc
+    cidrBlock: 10.0.1.0/24
+    availabilityZone: us-east-1a
+    tags:
+      Name: private-1a
+  providerConfigRef:
+    name: default
+---
+apiVersion: ec2.aws.upbound.io/v1beta1
+kind: SecurityGroup
+metadata:
+  name: app-sg
+spec:
+  forProvider:
+    region: us-east-1
+    vpcIdRef:
+      name: main-vpc
+    description: Application security group
+    name: app-sg
+  providerConfigRef:
+    name: default

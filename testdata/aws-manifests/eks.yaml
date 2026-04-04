@@ -1,0 +1,37 @@
+apiVersion: eks.aws.upbound.io/v1beta1
+kind: Cluster
+metadata:
+  name: prod-cluster
+spec:
+  forProvider:
+    region: us-east-1
+    roleArnRef:
+      name: eks-cluster-role
+    version: "1.29"
+    vpcConfig:
+      - endpointPrivateAccess: true
+        endpointPublicAccess: false
+        subnetIdRefs:
+          - name: private-subnet-1a
+  providerConfigRef:
+    name: default
+---
+apiVersion: eks.aws.upbound.io/v1beta1
+kind: NodeGroup
+metadata:
+  name: prod-workers
+spec:
+  forProvider:
+    region: us-east-1
+    clusterNameRef:
+      name: prod-cluster
+    nodeRoleArnRef:
+      name: eks-node-role
+    instanceTypes:
+      - m5.xlarge
+    scalingConfig:
+      - desiredSize: 3
+        maxSize: 10
+        minSize: 1
+  providerConfigRef:
+    name: default

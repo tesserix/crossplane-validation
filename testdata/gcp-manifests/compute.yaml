@@ -1,0 +1,43 @@
+apiVersion: compute.gcp.upbound.io/v1beta1
+kind: Network
+metadata:
+  name: main-network
+spec:
+  forProvider:
+    autoCreateSubnetworks: false
+    project: my-gcp-project
+  providerConfigRef:
+    name: default
+---
+apiVersion: compute.gcp.upbound.io/v1beta1
+kind: Subnetwork
+metadata:
+  name: app-subnet
+spec:
+  forProvider:
+    ipCidrRange: 10.0.0.0/24
+    region: asia-south1
+    networkRef:
+      name: main-network
+    project: my-gcp-project
+  providerConfigRef:
+    name: default
+---
+apiVersion: compute.gcp.upbound.io/v1beta1
+kind: Firewall
+metadata:
+  name: allow-internal
+spec:
+  forProvider:
+    networkRef:
+      name: main-network
+    project: my-gcp-project
+    allow:
+      - protocol: tcp
+        ports:
+          - "80"
+          - "443"
+    sourceRanges:
+      - 10.0.0.0/8
+  providerConfigRef:
+    name: default

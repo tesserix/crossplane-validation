@@ -1,0 +1,36 @@
+apiVersion: container.gcp.upbound.io/v1beta2
+kind: Cluster
+metadata:
+  name: prod-gke
+spec:
+  forProvider:
+    location: asia-south1
+    project: my-gcp-project
+    initialNodeCount: 1
+    removeDefaultNodePool: true
+    networkRef:
+      name: main-network
+    subnetworkRef:
+      name: app-subnet
+  providerConfigRef:
+    name: default
+---
+apiVersion: container.gcp.upbound.io/v1beta2
+kind: NodePool
+metadata:
+  name: prod-pool
+spec:
+  forProvider:
+    clusterRef:
+      name: prod-gke
+    location: asia-south1
+    project: my-gcp-project
+    nodeCount: 3
+    nodeConfig:
+      - machineType: e2-standard-4
+        diskSizeGb: 100
+        diskType: pd-standard
+        oauthScopes:
+          - https://www.googleapis.com/auth/cloud-platform
+  providerConfigRef:
+    name: default

@@ -1,0 +1,11 @@
+apiVersion: iam.gcp.upbound.io/v1beta1
+kind: ServiceAccount
+metadata:
+  name: app-sa
+spec:
+  forProvider:
+    project: my-gcp-project
+    displayName: Application Service Account
+    description: SA for the application workloads
+  providerConfigRef:
+    name: default
