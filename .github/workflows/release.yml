@@ -62,3 +62,99 @@ jobs:
         with:
           files: dist/crossplane-validate-*
           generate_release_notes: true
+
+  update-homebrew:
+    needs: publish
+    runs-on: ubuntu-latest
+    steps:
+      - name: Compute SHA256 checksums
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          mkdir -p dist
+          for platform in darwin-arm64 darwin-amd64 linux-arm64 linux-amd64; do
+            url="https://github.com/tesserix/crossplane-validation/releases/download/${TAG}/crossplane-validate-${platform}"
+            curl -sL "$url" -o "dist/crossplane-validate-${platform}"
+          done
+
+          echo "SHA_DARWIN_ARM64=$(sha256sum dist/crossplane-validate-darwin-arm64 | cut -d' ' -f1)" >> $GITHUB_ENV
+          echo "SHA_DARWIN_AMD64=$(sha256sum dist/crossplane-validate-darwin-amd64 | cut -d' ' -f1)" >> $GITHUB_ENV
+          echo "SHA_LINUX_ARM64=$(sha256sum dist/crossplane-validate-linux-arm64 | cut -d' ' -f1)" >> $GITHUB_ENV
+          echo "SHA_LINUX_AMD64=$(sha256sum dist/crossplane-validate-linux-amd64 | cut -d' ' -f1)" >> $GITHUB_ENV
+
+      - name: Checkout homebrew-tap
+        uses: actions/checkout@v4
+        with:
+          repository: tesserix/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-tap
+
+      - name: Update formula
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          VERSION="${TAG#v}"
+          FORMULA="homebrew-tap/Formula/crossplane-validate.rb"
+
+          cat > "$FORMULA" << RUBY
+          class CrossplaneValidate < Formula
+            desc "Terraform plan-like validation for Crossplane resources"
+            homepage "https://github.com/tesserix/crossplane-validation"
+            version "${VERSION}"
+            license "Apache-2.0"
+
+            on_macos do
+              on_arm do
+                url "https://github.com/tesserix/crossplane-validation/releases/download/${TAG}/crossplane-validate-darwin-arm64"
+                sha256 "${SHA_DARWIN_ARM64}"
+
+                def install
+                  bin.install "crossplane-validate-darwin-arm64" => "crossplane-validate"
+                end
+              end
+
+              on_intel do
+                url "https://github.com/tesserix/crossplane-validation/releases/download/${TAG}/crossplane-validate-darwin-amd64"
+                sha256 "${SHA_DARWIN_AMD64}"
+
+                def install
+                  bin.install "crossplane-validate-darwin-amd64" => "crossplane-validate"
+                end
+              end
+            end
+
+            on_linux do
+              on_arm do
+                url "https://github.com/tesserix/crossplane-validation/releases/download/${TAG}/crossplane-validate-linux-arm64"
+                sha256 "${SHA_LINUX_ARM64}"
+
+                def install
+                  bin.install "crossplane-validate-linux-arm64" => "crossplane-validate"
+                end
+              end
+
+              on_intel do
+                url "https://github.com/tesserix/crossplane-validation/releases/download/${TAG}/crossplane-validate-linux-amd64"
+                sha256 "${SHA_LINUX_AMD64}"
+
+                def install
+                  bin.install "crossplane-validate-linux-amd64" => "crossplane-validate"
+                end
+              end
+            end
+
+            test do
+              assert_match "crossplane-validate version", shell_output("#{bin}/crossplane-validate --version")
+            end
+          end
+          RUBY
+
+      - name: Push formula update
+        working-directory: homebrew-tap
+        run: |
+          git config user.name "sam123ben"
+          git config user.email "samyak.rout@gmail.com"
+          git add Formula/crossplane-validate.rb
+          git commit -m "update crossplane-validate to ${{ github.ref_name }}"
+          git push

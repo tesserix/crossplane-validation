@@ -1,8 +1,15 @@
 name: "Crossplane Validate"
 description: "Validate Crossplane resources before applying — like terraform plan for Crossplane"
 author: "tesserix"
+branding:
+  icon: "check-circle"
+  color: "blue"
 
 inputs:
+  version:
+    description: "Version to install (e.g., v0.1.0). Defaults to latest."
+    required: false
+    default: "latest"
   manifests:
     description: "Path to Crossplane manifests"
     required: false
@@ -15,26 +22,47 @@ inputs:
     description: "Enable cloud-aware validation with OpenTofu"
     required: false
     default: "false"
+  output-format:
+    description: "Output format: terminal, markdown, json"
+    required: false
+    default: "markdown"
 
 runs:
   using: "composite"
   steps:
-    - uses: actions/setup-go@v5
-      with:
-        go-version: "1.26"
-
-    - name: Build
+    - name: Install crossplane-validate
       shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
       run: |
-        cd ${{ github.action_path }}
-        go build -o /tmp/crossplane-validate ./cmd/crossplane-validate
+        OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+        ARCH=$(uname -m)
+        case "$ARCH" in
+          x86_64) ARCH="amd64" ;;
+          aarch64|arm64) ARCH="arm64" ;;
+        esac
 
-    - name: Validate
+        if [ "$VERSION" = "latest" ]; then
+          VERSION=$(gh release view --repo tesserix/crossplane-validation --json tagName -q .tagName 2>/dev/null || echo "")
+        fi
+
+        if [ -n "$VERSION" ]; then
+          URL="https://github.com/tesserix/crossplane-validation/releases/download/${VERSION}/crossplane-validate-${OS}-${ARCH}"
+          echo "Downloading crossplane-validate ${VERSION} for ${OS}/${ARCH}..."
+          curl -sL "$URL" -o /tmp/crossplane-validate
+          chmod +x /tmp/crossplane-validate
+        else
+          echo "No release found, building from source..."
+          cd ${{ github.action_path }}
+          go build -o /tmp/crossplane-validate ./cmd/crossplane-validate
+        fi
+
+    - name: Run validation
       shell: bash
       run: |
         args="plan --base=${{ inputs.base-branch }} --target=HEAD"
         args="$args --manifests=${{ inputs.manifests }}"
-        args="$args --output=markdown"
+        args="$args --output=${{ inputs.output-format }}"
         if [ "${{ inputs.cloud-mode }}" = "true" ]; then
           args="$args --cloud"
         fi
