@@ -6,7 +6,7 @@ If you discover a security vulnerability, please report it responsibly.
 
 **Do NOT open a public GitHub issue for security vulnerabilities.**
 
-Instead, email: samyak.rout@gmail.com
+Instead, email: unidevidp@gmail.com
 
 Include:
 - Description of the vulnerability

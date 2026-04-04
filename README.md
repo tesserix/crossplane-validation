@@ -501,7 +501,7 @@ We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
 
 - Use **read-only** cloud credentials for `--cloud` mode
 - Never commit credentials to your repository
-- Report vulnerabilities to samyak.rout@gmail.com (see [SECURITY.md](SECURITY.md))
+- Report vulnerabilities to unidevidp@gmail.com (see [SECURITY.md](SECURITY.md))
 
 ---
 
