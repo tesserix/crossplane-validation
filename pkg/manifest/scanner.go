@@ -16,14 +16,14 @@ import (
 
 // ResourceSet holds all parsed Crossplane resources grouped by type.
 type ResourceSet struct {
-	XRDs           []unstructured.Unstructured
-	Compositions   []unstructured.Unstructured
-	Claims         []unstructured.Unstructured
-	XRs            []unstructured.Unstructured
+	XRDs             []unstructured.Unstructured
+	Compositions     []unstructured.Unstructured
+	Claims           []unstructured.Unstructured
+	XRs              []unstructured.Unstructured
 	ManagedResources []unstructured.Unstructured
 	ProviderConfigs  []unstructured.Unstructured
-	Functions      []unstructured.Unstructured
-	Other          []unstructured.Unstructured
+	Functions        []unstructured.Unstructured
+	Other            []unstructured.Unstructured
 }
 
 // Scan reads all YAML files from the given directories and classifies them.

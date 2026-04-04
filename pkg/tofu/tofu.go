@@ -15,10 +15,10 @@ import (
 
 // PlanResult holds the output of an OpenTofu plan.
 type PlanResult struct {
-	RawOutput   string
-	Changes     []ResourceChange
-	HasChanges  bool
-	Summary     PlanSummary
+	RawOutput  string
+	Changes    []ResourceChange
+	HasChanges bool
+	Summary    PlanSummary
 }
 
 // ResourceChange represents a single resource change from the tofu plan.

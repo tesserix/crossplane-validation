@@ -42,8 +42,8 @@ type FieldChange struct {
 
 // DiffResult holds the complete diff between two rendered sets.
 type DiffResult struct {
-	Diffs    []ResourceDiff
-	Summary  DiffSummary
+	Diffs   []ResourceDiff
+	Summary DiffSummary
 }
 
 // DiffSummary counts resources by action.
