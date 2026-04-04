@@ -5,6 +5,8 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+
 	"github.com/tesserix/crossplane-validation/pkg/config"
 	"github.com/tesserix/crossplane-validation/pkg/diff"
 	"github.com/tesserix/crossplane-validation/pkg/hcl"
@@ -26,6 +28,7 @@ func main() {
 	root.AddCommand(planCmd())
 	root.AddCommand(diffCmd())
 	root.AddCommand(renderCmd())
+	root.AddCommand(scanCmd())
 
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
@@ -47,8 +50,8 @@ func planCmd() *cobra.Command {
 		Short: "Show what will change when the current branch is merged",
 		Long: `Compares Crossplane manifests between branches and shows a terraform-style plan.
 
-Mode 1 (default): Git-based diff — compares rendered manifests between base and target branches.
-Mode 3 (--cloud): Cloud-aware plan — converts to HCL and runs OpenTofu plan with read-only credentials.`,
+By default, performs a git-based diff comparing rendered manifests between base and target branches.
+With --cloud, converts to HCL and runs OpenTofu plan with read-only credentials for cloud-aware validation.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := config.Load(configFile)
 			if err != nil {
@@ -176,6 +179,55 @@ func renderCmd() *cobra.Command {
 			}
 
 			return renderer.Print(rendered, os.Stdout)
+		},
+	}
+}
+
+func scanCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "scan [path]",
+		Short: "Scan a directory and show all detected Crossplane resources",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			dir := "."
+			if len(args) > 0 {
+				dir = args[0]
+			}
+
+			rs, err := manifest.Scan([]string{dir})
+			if err != nil {
+				return err
+			}
+
+			total := len(rs.AllResources())
+			fmt.Fprintf(os.Stdout, "Scanned: %s\n\n", dir)
+
+			if total == 0 {
+				fmt.Fprintln(os.Stdout, "No Crossplane resources found.")
+				return nil
+			}
+
+			printSection := func(name string, resources []unstructured.Unstructured) {
+				if len(resources) == 0 {
+					return
+				}
+				fmt.Fprintf(os.Stdout, "%s (%d)\n", name, len(resources))
+				for _, r := range resources {
+					fmt.Fprintf(os.Stdout, "  %-40s %s\n", r.GetKind()+"/"+r.GetName(), r.GetAPIVersion())
+				}
+				fmt.Fprintln(os.Stdout)
+			}
+
+			printSection("XRDs", rs.XRDs)
+			printSection("Compositions", rs.Compositions)
+			printSection("Functions", rs.Functions)
+			printSection("Claims", rs.Claims)
+			printSection("Composite Resources (XRs)", rs.XRs)
+			printSection("Managed Resources", rs.ManagedResources)
+			printSection("Provider Configs", rs.ProviderConfigs)
+			printSection("Other", rs.Other)
+
+			fmt.Fprintf(os.Stdout, "Total: %d resources\n", total)
+			return nil
 		},
 	}
 }
