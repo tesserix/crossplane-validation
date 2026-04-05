@@ -65,6 +65,18 @@ func Convert(rs *renderer.RenderedSet, providers map[string]config.Provider) (*C
 			if prov.SubscriptionID != "" {
 				pb.Attributes["subscription_id"] = prov.SubscriptionID
 			}
+			if prov.TenantID != "" && (tfProvider == "azurerm" || tfProvider == "azuread") {
+				pb.Attributes["tenant_id"] = prov.TenantID
+			}
+			if prov.ClientID != "" && (tfProvider == "azurerm" || tfProvider == "azuread") {
+				pb.Attributes["client_id"] = prov.ClientID
+			}
+			if prov.Credentials == "oidc" && (tfProvider == "azurerm" || tfProvider == "azuread") {
+				pb.Attributes["use_oidc"] = true
+			}
+			if prov.Credentials == "oidc" && tfProvider == "aws" {
+				// AWS OIDC is handled via environment variables, not provider block
+			}
 		}
 		cs.ProviderBlocks = append(cs.ProviderBlocks, pb)
 	}

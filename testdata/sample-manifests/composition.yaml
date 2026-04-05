@@ -39,3 +39,16 @@ spec:
         - type: FromCompositeFieldPath
           fromFieldPath: spec.acl
           toFieldPath: spec.forProvider.acl
+
+    - name: bucket-versioning
+      base:
+        apiVersion: s3.aws.upbound.io/v1beta1
+        kind: BucketVersioning
+        spec:
+          forProvider:
+            bucketSelector:
+              matchControllerRef: true
+            versioningConfiguration:
+              - status: Enabled
+          providerConfigRef:
+            name: default

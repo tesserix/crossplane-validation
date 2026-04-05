@@ -7,7 +7,7 @@ spec:
     region: us-east-1
     roleArnRef:
       name: eks-cluster-role
-    version: "1.29"
+    version: "1.31"
     vpcConfig:
       - endpointPrivateAccess: true
         endpointPublicAccess: false
@@ -28,10 +28,10 @@ spec:
     nodeRoleArnRef:
       name: eks-node-role
     instanceTypes:
-      - m5.xlarge
+      - m6i.2xlarge
     scalingConfig:
-      - desiredSize: 3
-        maxSize: 10
-        minSize: 1
+      - desiredSize: 5
+        maxSize: 20
+        minSize: 2
   providerConfigRef:
     name: default

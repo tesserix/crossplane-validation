@@ -7,8 +7,10 @@ spec:
     region: us-east-1
     engine: postgres
     engineVersion: "16.2"
-    instanceClass: db.r6g.large
-    allocatedStorage: 100
+    instanceClass: db.r6g.xlarge
+    allocatedStorage: 200
+    storageEncrypted: true
+    multiAz: true
     dbName: appdb
     masterUsername: admin
     skipFinalSnapshot: true
