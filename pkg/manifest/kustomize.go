@@ -40,7 +40,60 @@ func ScanWithKustomize(dirs []string) (*ResourceSet, error) {
 		}
 	}
 
+	// If kustomize scanning found no Crossplane resources (only ArgoCD, k8s, etc.),
+	// auto-discover subdirectories that contain Crossplane manifests.
+	if !hasCrossplaneResources(rs) {
+		for _, dir := range dirs {
+			if err := scanSubdirectories(dir, rs, visited); err != nil {
+				return nil, err
+			}
+		}
+	}
+
 	return rs, nil
+}
+
+func hasCrossplaneResources(rs *ResourceSet) bool {
+	return len(rs.XRDs) > 0 || len(rs.Compositions) > 0 ||
+		len(rs.ManagedResources) > 0 || len(rs.XRs) > 0 ||
+		len(rs.Claims) > 0 || len(rs.Functions) > 0
+}
+
+func scanSubdirectories(dir string, rs *ResourceSet, visited map[string]bool) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+
+		subDir := filepath.Join(dir, entry.Name())
+		absSubDir, _ := filepath.Abs(subDir)
+		if visited[absSubDir] {
+			continue
+		}
+
+		kPath := findKustomization(absSubDir)
+		if kPath != "" {
+			if err := scanKustomizeTree(absSubDir, rs, visited); err != nil {
+				return err
+			}
+		} else {
+			// Scan YAML files in this directory directly
+			if err := scanDirectYAMLs(subDir, rs); err != nil {
+				return err
+			}
+			// Also recurse into nested subdirectories
+			if err := scanSubdirectories(subDir, rs, visited); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
 }
 
 func scanKustomizeTree(dir string, rs *ResourceSet, visited map[string]bool) error {

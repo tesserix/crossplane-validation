@@ -198,6 +198,43 @@ metadata:
 	}
 }
 
+func TestScanWithKustomizeAutoDiscoversSubdirs(t *testing.T) {
+	dir := t.TempDir()
+
+	// Top-level kustomization only references a non-crossplane resource (ArgoCD)
+	writeFile(t, filepath.Join(dir, "kustomization.yaml"), `
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - appset.yaml
+`)
+	writeFile(t, filepath.Join(dir, "appset.yaml"), `
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: my-apps
+`)
+
+	// Subdirectory with actual Crossplane resources (no kustomization.yaml)
+	subDir := filepath.Join(dir, "infra")
+	os.MkdirAll(subDir, 0755)
+	writeFile(t, filepath.Join(subDir, "bucket.yaml"), `
+apiVersion: s3.aws.upbound.io/v1beta1
+kind: Bucket
+metadata:
+  name: my-bucket
+`)
+
+	rs, err := ScanWithKustomize([]string{dir})
+	if err != nil {
+		t.Fatalf("ScanWithKustomize auto-discover: %v", err)
+	}
+
+	if len(rs.ManagedResources) != 1 {
+		t.Errorf("expected 1 MR from auto-discovered subdir, got %d", len(rs.ManagedResources))
+	}
+}
+
 func kustomizeTestPath(subdir string) string {
 	wd, _ := os.Getwd()
 	base := filepath.Join(wd, "..", "..", "testdata", "kustomize-test")
