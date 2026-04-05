@@ -41,6 +41,27 @@ Runs locally, in CI, or both. No cluster required.
 
 ---
 
+<details>
+<summary><strong>Table of Contents</strong></summary>
+
+- [Why](#why)
+- [Install](#install)
+- [Commands](#commands) — `plan` | `validate` | `lint` | `scan` | `render` | `diff`
+- [Guardrails](#guardrails) — sensitive masking, destructive warnings, CI gating
+- [Cloud-Aware Plan](#cloud-aware-plan)
+- [Multi-Cloud](#multi-cloud) — provider & credential auto-detection
+- [GitHub Action](#github-action) — basic, OIDC, CI gate, linting
+- [Configuration](#configuration) — config file, credential modes, OIDC
+- [How It Works](#how-it-works) — architecture diagram
+- [Composition Rendering](#composition-rendering)
+- [Prerequisites](#prerequisites) — required, optional, cloud credentials
+- [Project Structure](#project-structure)
+- [Roadmap](#roadmap)
+
+</details>
+
+---
+
 ## Why
 
 Crossplane manages cloud infrastructure through Kubernetes manifests. But unlike Terraform, there is no built-in way to preview what a change will do before it reaches your cloud.
@@ -259,6 +280,14 @@ crossplane-validate plan --manifests=./crossplane/ --cloud
 ```
 
 ```
+Cloud authentication:
+  aws:         profile "default" (env)
+  azure:       OIDC federation (env)
+
+Loading provider schemas...
+Converting to HCL...
+Running cloud plan (read-only)...
+
 ═══ Structural Changes ═══
 
   ~ Account/storage01
@@ -274,20 +303,33 @@ Plan: 0 to add, 1 to change, 0 to destroy
 Cloud: 0 to add, 1 to change, 0 to destroy
 ```
 
+If no credentials are found, the CLI tells you exactly what it checked:
+
+```
+Cloud mode: no credentials detected
+  Checked: AWS_ACCESS_KEY_ID, AWS_PROFILE, GOOGLE_APPLICATION_CREDENTIALS,
+           ARM_CLIENT_ID, ARM_SUBSCRIPTION_ID, OIDC tokens
+  Tip: authenticate with your cloud provider or set credentials in .crossplane-validate.yml
+  Skipping cloud plan.
+```
+
 **How it works:**
 1. Auto-detects providers from your manifests (AWS, GCP, Azure, Azure AD, Datadog, any Upjet provider)
-2. Downloads provider schema via `terraform providers schema -json` — no hardcoded resource mappings
-3. Dynamically maps Crossplane resource types to Terraform types
-4. Imports existing resources via `terraform import` using external-name annotations
-5. Runs `terraform plan` to show real cloud impact
+2. Auto-detects credentials from your environment (env vars, CLI profiles, OIDC, managed identity)
+3. Downloads provider schema via `terraform providers schema -json` — no hardcoded resource mappings
+4. Dynamically maps Crossplane resource types to Terraform types
+5. Imports existing resources via `terraform import` using external-name annotations
+6. Runs `terraform plan` to show real cloud impact
 
-**Requirements:** Terraform or OpenTofu installed, cloud credentials in environment (read-only recommended).
+**Requirements:** Terraform or OpenTofu installed, cloud credentials available (read-only recommended).
 
 ---
 
 ## Multi-Cloud
 
-Providers are auto-detected from your manifests. No configuration needed.
+### Provider Auto-Detection
+
+Providers are detected automatically from your manifests. No configuration needed.
 
 | Cloud | Detected from | Terraform Provider |
 |-------|---------------|-------------------|
@@ -297,6 +339,27 @@ Providers are auto-detected from your manifests. No configuration needed.
 | Azure AD | `*.azuread.upbound.io` | `hashicorp/azuread` |
 | Datadog | `*.datadog.upbound.io` | `datadog/datadog` |
 | Any Upjet | `*.<name>.upbound.io` | Derived dynamically |
+
+### Credential Auto-Detection
+
+Credentials are also auto-detected from your environment. The CLI checks standard auth methods in order:
+
+| Provider | Auth Method | How It's Detected |
+|----------|-------------|-------------------|
+| **AWS** | Access keys | `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` |
+| | Named profile | `AWS_PROFILE` (uses `~/.aws/credentials`) |
+| | OIDC federation | `AWS_WEB_IDENTITY_TOKEN_FILE` + `AWS_ROLE_ARN` |
+| | Instance profile | EC2/ECS metadata (automatic) |
+| **GCP** | Service account key | `GOOGLE_APPLICATION_CREDENTIALS` |
+| | Application Default Credentials | `gcloud auth application-default login` |
+| | Workload Identity | GCP auth GitHub Action sets `GOOGLE_APPLICATION_CREDENTIALS` |
+| | Service account impersonation | Config: `service-account` field |
+| **Azure** | Service principal | `ARM_CLIENT_ID` + `ARM_CLIENT_SECRET` + `ARM_TENANT_ID` |
+| | Azure CLI | `az login` (detected via `ARM_USE_CLI`) |
+| | OIDC federation | `ARM_USE_OIDC=true` (auto-detected in GitHub Actions) |
+| | Managed Identity | `ARM_USE_MSI=true` (for Azure-hosted runners) |
+
+In GitHub Actions, OIDC is auto-detected when `ACTIONS_ID_TOKEN_REQUEST_URL` is set — no manual configuration needed.
 
 ---
 
@@ -354,6 +417,40 @@ jobs:
             }
 ```
 
+### With cloud plan (OIDC — no secrets needed)
+
+```yaml
+      - name: Auth to AWS (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::123456789012:role/crossplane-validate
+          aws-region: us-east-1
+
+      - name: Cloud Plan
+        run: |
+          ./crossplane-validate plan \
+            --base=origin/main --target=HEAD \
+            --manifests=./crossplane/ \
+            --cloud --output=markdown > plan.md 2>/dev/null || true
+```
+
+```yaml
+      # Azure OIDC
+      - name: Auth to Azure (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # GCP Workload Identity
+      - name: Auth to GCP (OIDC)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: projects/123/locations/global/workloadIdentityPools/github/providers/repo
+          service_account: validate@my-project.iam.gserviceaccount.com
+```
+
 ### With CI gate (block merge on changes without approval)
 
 ```yaml
@@ -363,6 +460,7 @@ jobs:
             --base=origin/main --target=HEAD \
             --manifests=./crossplane/ \
             --detailed-exitcode
+          # Exit 0 = no changes, 1 = error, 2 = changes detected
 ```
 
 ### With validation and linting
@@ -381,7 +479,16 @@ jobs:
 
 ## Configuration
 
-Optional `.crossplane-validate.yml` in your repo root:
+Optional `.crossplane-validate.yml` in your repo root. Without it, the CLI scans the current directory and auto-detects everything.
+
+### Minimal (most common)
+
+```yaml
+manifests:
+  - crossplane/
+```
+
+### With provider regions/projects
 
 ```yaml
 manifests:
@@ -390,15 +497,49 @@ manifests:
 
 providers:
   aws:
-    credentials: env
     region: us-east-1
   gcp:
-    credentials: env
-    project: my-project
+    project: my-gcp-project
   azure:
-    credentials: env
     subscription-id: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+    tenant-id: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+```
 
+### With OIDC federation (CI/CD)
+
+```yaml
+providers:
+  aws:
+    credentials: oidc
+    region: us-east-1
+    role-arn: arn:aws:iam::123456789012:role/crossplane-validate-readonly
+
+  gcp:
+    credentials: oidc
+    project: my-gcp-project
+    service-account: validate@my-gcp-project.iam.gserviceaccount.com
+
+  azure:
+    credentials: oidc
+    subscription-id: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+    tenant-id: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+    client-id: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+```
+
+### Credential modes
+
+| Mode | Value | Description |
+|------|-------|-------------|
+| Auto-detect | `""` (default) | Checks environment variables, CLI profiles, OIDC, managed identity |
+| Environment | `env` | Uses standard cloud SDK environment variables |
+| Default chain | `default` | AWS profiles, GCP ADC, Azure CLI |
+| OIDC | `oidc` | Workload identity federation (GitHub Actions, GitLab CI) |
+| Azure CLI | `cli` | Uses `az login` session |
+| Managed Identity | `msi` | Azure VMs, AKS, GitHub-hosted runners with MSI |
+
+### Settings
+
+```yaml
 settings:
   timeout: 10m
   ignore-fields:
@@ -406,8 +547,6 @@ settings:
     - metadata.uid
     - status.conditions
 ```
-
-Without a config file, the CLI scans the current directory and auto-detects providers.
 
 ---
 
@@ -473,14 +612,38 @@ Nested compositions (XR → Composition → XR → Composition) are followed up 
 
 ## Prerequisites
 
-| Requirement | When |
-|---|---|
-| Git | Always (branch comparison) |
-| Terraform or OpenTofu | `--cloud` mode only |
-| Cloud credentials (read-only) | `--cloud` mode only |
-| Docker + Crossplane CLI | Full Function Pipeline rendering (optional) |
+### Required
 
-For basic validation (`plan`, `validate`, `scan`), all you need is the binary and a git repo.
+| Tool | Purpose | Install |
+|------|---------|---------|
+| Git | Branch comparison for `plan` and `diff` | Pre-installed on most systems |
+
+### Optional
+
+| Tool | Purpose | When | Install |
+|------|---------|------|---------|
+| Terraform or OpenTofu | Cloud-aware plan | `--cloud` flag | `brew install opentofu` or `brew install terraform` |
+| Docker | Function Pipeline rendering | Compositions with functions | [docker.com](https://docs.docker.com/get-docker/) |
+| Crossplane CLI | Full composition rendering | Compositions with functions | `brew install crossplane-cli` |
+| yamllint | YAML syntax checking | `lint` command | `brew install yamllint` |
+| kubeconform | K8s schema validation | `lint` command | `brew install kubeconform` |
+| pluto | Deprecated API detection | `lint` command | `brew install FairwindsOps/tap/pluto` |
+| kube-linter | K8s best practices | `lint` command | `brew install kube-linter` |
+
+### Cloud credentials (for `--cloud` mode)
+
+No special setup needed — the CLI auto-detects credentials from your environment:
+
+| If you use... | Just do this | It works because... |
+|---------------|--------------|---------------------|
+| AWS CLI | `aws configure` or `export AWS_PROFILE=myprofile` | Reads `~/.aws/credentials` |
+| GCP CLI | `gcloud auth application-default login` | Sets Application Default Credentials |
+| Azure CLI | `az login` | Terraform detects Azure CLI session |
+| GitHub Actions | Add OIDC auth step to workflow | Auto-detected from `ACTIONS_ID_TOKEN_REQUEST_URL` |
+| Service accounts | Set `GOOGLE_APPLICATION_CREDENTIALS` or `ARM_CLIENT_ID` | Standard SDK environment variables |
+| Managed Identity | Run on Azure VM/AKS/GitHub-hosted runners with MSI | Set `ARM_USE_MSI=true` |
+
+Read-only credentials are recommended. The CLI only reads cloud state — it never creates, modifies, or deletes resources.
 
 ---
 
@@ -532,9 +695,11 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). Good first contributions:
 
 ## Security
 
-- Sensitive fields are automatically masked in all output
-- Use read-only cloud credentials for `--cloud` mode
-- Never commit credentials to your repository
+- **Sensitive field masking** — passwords, tokens, API keys, certificates automatically redacted in all output (PR comments, terminal, JSON). Use `--show-sensitive` to override locally.
+- **Read-only credentials** — the CLI only reads cloud state, never creates or modifies resources. Use read-only IAM roles/policies.
+- **OIDC preferred** — use workload identity federation instead of long-lived secrets in CI/CD. No secrets to rotate or leak.
+- **No credentials in output** — cloud credentials are never printed in plan output, logs, or PR comments.
+- **Never commit credentials** — use environment variables, CLI auth, or OIDC. The `.crossplane-validate.yml` config file stores references (`oidc`, `env`, `cli`), not actual secrets.
 - Report vulnerabilities to unidevidp@gmail.com (see [SECURITY.md](SECURITY.md))
 
 ---
