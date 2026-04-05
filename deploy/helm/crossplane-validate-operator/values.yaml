@@ -50,6 +50,8 @@ operator:
   logLevel: info
   # Comma-separated additional API groups to watch
   watchGroups: ""
+  # Enable leader election for HA (multiple replicas)
+  leaderElect: false
 
 # Cloud credentials for --cloud mode (optional).
 # The operator needs cloud read access for live plan comparisons.

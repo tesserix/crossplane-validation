@@ -9,13 +9,18 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/tools/leaderelection"
+	"k8s.io/client-go/tools/leaderelection/resourcelock"
 
 	grpcpkg "github.com/tesserix/crossplane-validation/pkg/grpc"
 	"github.com/tesserix/crossplane-validation/pkg/notify"
@@ -26,13 +31,17 @@ var version = "dev"
 
 func main() {
 	var (
-		grpcPort    int
-		healthPort  int
-		watchGroups string
-		kubeconfig  string
-		logLevel    string
-		slackURL    string
-		teamsURL    string
+		grpcPort       int
+		healthPort     int
+		watchGroups    string
+		kubeconfig     string
+		logLevel       string
+		slackURL       string
+		teamsURL       string
+		leaderElect    bool
+		leaderLockName string
+		podName        string
+		podNamespace   string
 	)
 
 	flag.IntVar(&grpcPort, "grpc-port", 9443, "gRPC server port")
@@ -42,6 +51,10 @@ func main() {
 	flag.StringVar(&logLevel, "log-level", "info", "Log level (debug, info, warn, error)")
 	flag.StringVar(&slackURL, "slack-webhook", "", "Slack webhook URL for notifications")
 	flag.StringVar(&teamsURL, "teams-webhook", "", "Teams webhook URL for notifications")
+	flag.BoolVar(&leaderElect, "leader-elect", false, "Enable leader election for HA deployments")
+	flag.StringVar(&leaderLockName, "leader-lock-name", "crossplane-validate-operator", "Leader election lock name")
+	flag.StringVar(&podName, "pod-name", os.Getenv("POD_NAME"), "Pod name (from downward API)")
+	flag.StringVar(&podNamespace, "pod-namespace", os.Getenv("POD_NAMESPACE"), "Pod namespace (from downward API)")
 	flag.Parse()
 
 	log.Printf("crossplane-validate-operator %s starting", version)
@@ -50,6 +63,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("building kubernetes config: %v", err)
 	}
+
+	config.QPS = 50
+	config.Burst = 100
 
 	dynamicClient, err := dynamic.NewForConfig(config)
 	if err != nil {
@@ -67,14 +83,6 @@ func main() {
 	}
 
 	cache := operator.NewStateCache(dynamicClient, discoveryClient, extraGroups)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	log.Println("starting state cache, discovering Crossplane resources...")
-	if err := cache.Start(ctx); err != nil {
-		log.Fatalf("starting state cache: %v", err)
-	}
 
 	var notifiers []notify.Notifier
 	if slackURL != "" {
@@ -95,6 +103,7 @@ func main() {
 		Notifier: notifier,
 	})
 
+	var ready atomic.Bool
 	errCh := make(chan error, 2)
 
 	go func() {
@@ -103,12 +112,79 @@ func main() {
 		}
 	}()
 
-	healthSrv := startHealthServer(healthPort, cache)
+	healthSrv := startHealthServer(healthPort, cache, &ready)
 
-	log.Printf("operator ready — gRPC :%d, health :%d", grpcPort, healthPort)
+	run := func(ctx context.Context) {
+		log.Println("starting state cache, discovering Crossplane resources...")
+		if err := cache.Start(ctx); err != nil {
+			log.Printf("state cache start error: %v", err)
+			errCh <- err
+			return
+		}
+		ready.Store(true)
+		log.Printf("operator ready — gRPC :%d, health :%d, cached %d resources",
+			grpcPort, healthPort, cache.ResourceCount())
+
+		<-ctx.Done()
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+
+	if leaderElect {
+		clientset, err := kubernetes.NewForConfig(config)
+		if err != nil {
+			log.Fatalf("creating kubernetes clientset: %v", err)
+		}
+
+		ns := podNamespace
+		if ns == "" {
+			ns = "crossplane-validator"
+		}
+		id := podName
+		if id == "" {
+			hostname, _ := os.Hostname()
+			id = hostname
+		}
+
+		log.Printf("starting leader election (id=%s, namespace=%s)", id, ns)
+
+		lock := &resourcelock.LeaseLock{
+			LeaseMeta: metav1.ObjectMeta{
+				Name:      leaderLockName,
+				Namespace: ns,
+			},
+			Client: clientset.CoordinationV1(),
+			LockConfig: resourcelock.ResourceLockConfig{
+				Identity: id,
+			},
+		}
+
+		go leaderelection.RunOrDie(ctx, leaderelection.LeaderElectionConfig{
+			Lock:            lock,
+			LeaseDuration:   15 * time.Second,
+			RenewDeadline:   10 * time.Second,
+			RetryPeriod:     2 * time.Second,
+			ReleaseOnCancel: true,
+			Callbacks: leaderelection.LeaderCallbacks{
+				OnStartedLeading: run,
+				OnStoppedLeading: func() {
+					log.Println("lost leadership, shutting down")
+					cancel()
+				},
+				OnNewLeader: func(identity string) {
+					if identity != id {
+						log.Printf("new leader elected: %s", identity)
+					}
+				},
+			},
+		})
+	} else {
+		go run(ctx)
+	}
 
 	select {
 	case sig := <-sigCh:
@@ -117,6 +193,7 @@ func main() {
 		log.Printf("fatal error: %v, shutting down...", err)
 	}
 
+	cancel()
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
 
@@ -144,7 +221,7 @@ func buildConfig(kubeconfig string) (*rest.Config, error) {
 	return clientcmd.BuildConfigFromFlags("", kubeconfig)
 }
 
-func startHealthServer(port int, cache *operator.StateCache) *http.Server {
+func startHealthServer(port int, cache *operator.StateCache, ready *atomic.Bool) *http.Server {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -153,9 +230,9 @@ func startHealthServer(port int, cache *operator.StateCache) *http.Server {
 	})
 
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
-		if cache.ResourceCount() == 0 {
+		if !ready.Load() {
 			w.WriteHeader(http.StatusServiceUnavailable)
-			fmt.Fprintln(w, "cache not populated")
+			fmt.Fprintln(w, "cache syncing")
 			return
 		}
 		w.WriteHeader(http.StatusOK)

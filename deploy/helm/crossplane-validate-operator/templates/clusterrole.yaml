@@ -21,6 +21,10 @@ rules:
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["get"]
+  # Leader election
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update"]
   # Broad read-only for all Crossplane provider CRDs and XR types.
   # The operator dynamically discovers which API groups have Crossplane
   # resources — it needs list/watch on all of them.

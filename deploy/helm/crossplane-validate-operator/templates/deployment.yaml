@@ -45,6 +45,9 @@ spec:
             - --grpc-port={{ .Values.service.grpcPort }}
             - --health-port={{ .Values.service.healthPort }}
             - --log-level={{ .Values.operator.logLevel }}
+            {{- if .Values.operator.leaderElect }}
+            - --leader-elect=true
+            {{- end }}
             {{- if .Values.operator.watchGroups }}
             - --watch-groups={{ .Values.operator.watchGroups }}
             {{- end }}
@@ -55,6 +58,14 @@ spec:
             - --teams-webhook={{ .Values.notifications.teams.webhookUrl }}
             {{- end }}
           env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
             {{- if and .Values.cloudCredentials.reuseProviderSecret (eq .Values.cloudCredentials.provider "aws") }}
             - name: AWS_SHARED_CREDENTIALS_FILE
               value: /var/run/secrets/provider/{{ .Values.cloudCredentials.reuseProviderSecretKey }}
@@ -91,13 +102,15 @@ spec:
               path: /healthz
               port: health
             initialDelaySeconds: 5
-            periodSeconds: 10
+            periodSeconds: 15
+            failureThreshold: 5
           readinessProbe:
             httpGet:
               path: /readyz
               port: health
-            initialDelaySeconds: 10
-            periodSeconds: 5
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 12
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           {{- if or .Values.cloudCredentials.reuseProviderSecret .Values.cloudCredentials.gcpKeySecret }}
