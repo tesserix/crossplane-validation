@@ -90,11 +90,13 @@ func Render(rs *manifest.ResourceSet) (*RenderedSet, error) {
 }
 
 // ResourceKey returns a unique identifier for a rendered resource.
+// Format: apiVersion/kind/namespace/name (namespace is empty for cluster-scoped resources).
 func (r *RenderedResource) ResourceKey() string {
 	res := r.Resource
-	return fmt.Sprintf("%s/%s/%s",
+	return fmt.Sprintf("%s/%s/%s/%s",
 		res.GetAPIVersion(),
 		res.GetKind(),
+		res.GetNamespace(),
 		res.GetName(),
 	)
 }

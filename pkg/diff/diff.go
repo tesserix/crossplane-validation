@@ -11,6 +11,57 @@ import (
 	"github.com/tesserix/crossplane-validation/pkg/renderer"
 )
 
+// ShowSensitive disables sensitive field masking when set to true.
+var ShowSensitive bool
+
+// sensitiveKeywords are matched case-insensitively against the last segment of a field path.
+var sensitiveKeywords = []string{
+	"password",
+	"secret",
+	"token",
+	"key",
+	"credential",
+	"apikey",
+	"masterpassword",
+	"connectionstring",
+	"accesskey",
+	"secretkey",
+	"privatekey",
+	"cert",
+	"certificate",
+}
+
+// isSensitiveField checks if the last segment of a dot-separated field path
+// contains any sensitive keyword (case-insensitive).
+func isSensitiveField(path string) bool {
+	parts := strings.Split(path, ".")
+	field := strings.ToLower(parts[len(parts)-1])
+	for _, kw := range sensitiveKeywords {
+		if strings.Contains(field, kw) {
+			return true
+		}
+	}
+	return false
+}
+
+// maskFieldChange replaces values in a FieldChange if the field is sensitive.
+func maskFieldChange(fc FieldChange) FieldChange {
+	if ShowSensitive || !isSensitiveField(fc.Path) {
+		return fc
+	}
+	masked := fc
+	switch fc.Action {
+	case ActionCreate:
+		masked.NewValue = "(sensitive value)"
+	case ActionUpdate:
+		masked.OldValue = "(sensitive value)"
+		masked.NewValue = "(sensitive value changed)"
+	case ActionDelete:
+		masked.OldValue = "(sensitive value removed)"
+	}
+	return masked
+}
+
 // Action represents what will happen to a resource.
 type Action string
 
@@ -28,6 +79,7 @@ type ResourceDiff struct {
 	APIVersion   string
 	Kind         string
 	Name         string
+	Namespace    string
 	Source       string
 	FieldChanges []FieldChange
 }
@@ -72,6 +124,7 @@ func Compute(base, target *renderer.RenderedSet) *DiffResult {
 				APIVersion:  targetRes.Resource.GetAPIVersion(),
 				Kind:        targetRes.Resource.GetKind(),
 				Name:        targetRes.Resource.GetName(),
+				Namespace:   targetRes.Resource.GetNamespace(),
 				Source:      targetRes.Source,
 			}
 			d.FieldChanges = flattenFields("", nil, targetRes.Resource.Object, ActionCreate)
@@ -87,6 +140,7 @@ func Compute(base, target *renderer.RenderedSet) *DiffResult {
 					APIVersion:   targetRes.Resource.GetAPIVersion(),
 					Kind:         targetRes.Resource.GetKind(),
 					Name:         targetRes.Resource.GetName(),
+					Namespace:    targetRes.Resource.GetNamespace(),
 					Source:       targetRes.Source,
 					FieldChanges: changes,
 				})
@@ -106,6 +160,7 @@ func Compute(base, target *renderer.RenderedSet) *DiffResult {
 				APIVersion:  baseRes.Resource.GetAPIVersion(),
 				Kind:        baseRes.Resource.GetKind(),
 				Name:        baseRes.Resource.GetName(),
+				Namespace:   baseRes.Resource.GetNamespace(),
 				Source:      baseRes.Source,
 			}
 			d.FieldChanges = flattenFields("", baseRes.Resource.Object, nil, ActionDelete)
@@ -173,31 +228,250 @@ func diffMaps(prefix string, base, target map[string]interface{}) []FieldChange 
 
 		switch {
 		case !baseExists && targetExists:
-			changes = append(changes, FieldChange{
+			changes = append(changes, maskFieldChange(FieldChange{
 				Path:     path,
 				NewValue: targetVal,
 				Action:   ActionCreate,
-			})
+			}))
 		case baseExists && !targetExists:
-			changes = append(changes, FieldChange{
+			changes = append(changes, maskFieldChange(FieldChange{
 				Path:     path,
 				OldValue: baseVal,
 				Action:   ActionDelete,
-			})
+			}))
 		case baseExists && targetExists:
 			baseMap, baseIsMap := baseVal.(map[string]interface{})
 			targetMap, targetIsMap := targetVal.(map[string]interface{})
 
+			baseArr, baseIsArr := baseVal.([]interface{})
+			targetArr, targetIsArr := targetVal.([]interface{})
+
 			if baseIsMap && targetIsMap {
 				changes = append(changes, diffMaps(path, baseMap, targetMap)...)
+			} else if baseIsArr && targetIsArr {
+				changes = append(changes, diffArrays(path, baseArr, targetArr)...)
 			} else if !reflect.DeepEqual(baseVal, targetVal) {
-				changes = append(changes, FieldChange{
+				changes = append(changes, maskFieldChange(FieldChange{
 					Path:     path,
 					OldValue: baseVal,
 					NewValue: targetVal,
 					Action:   ActionUpdate,
-				})
+				}))
 			}
+		}
+	}
+
+	return changes
+}
+
+// diffArrays computes a meaningful diff between two arrays.
+// For short arrays (both <= 3 elements), it falls back to atomic comparison.
+// For arrays of primitives, it computes a set diff (added/removed elements).
+// For arrays of maps, it tries to match elements by common key fields and diff matched pairs.
+// Otherwise, it falls back to atomic comparison.
+func diffArrays(path string, old, new []interface{}) []FieldChange {
+	if reflect.DeepEqual(old, new) {
+		return nil
+	}
+
+	// Short arrays: atomic comparison for brevity
+	if len(old) <= 3 && len(new) <= 3 {
+		return []FieldChange{maskFieldChange(FieldChange{
+			Path:     path,
+			OldValue: old,
+			NewValue: new,
+			Action:   ActionUpdate,
+		})}
+	}
+
+	// Check if arrays are primitives
+	if isArrayOfPrimitives(old) && isArrayOfPrimitives(new) {
+		return diffPrimitiveArrays(path, old, new)
+	}
+
+	// Check if arrays are maps with identifiable keys
+	if isArrayOfMaps(old) && isArrayOfMaps(new) {
+		if changes := diffMapArrays(path, old, new); changes != nil {
+			return changes
+		}
+	}
+
+	// Fallback: atomic comparison
+	return []FieldChange{maskFieldChange(FieldChange{
+		Path:     path,
+		OldValue: old,
+		NewValue: new,
+		Action:   ActionUpdate,
+	})}
+}
+
+// isArrayOfPrimitives returns true if every element is a string, number, or bool.
+func isArrayOfPrimitives(arr []interface{}) bool {
+	for _, v := range arr {
+		switch v.(type) {
+		case string, float64, int64, bool, int, float32:
+			continue
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// isArrayOfMaps returns true if every element is a map[string]interface{}.
+func isArrayOfMaps(arr []interface{}) bool {
+	if len(arr) == 0 {
+		return false
+	}
+	for _, v := range arr {
+		if _, ok := v.(map[string]interface{}); !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// diffPrimitiveArrays computes added/removed elements between two arrays of primitives.
+func diffPrimitiveArrays(path string, old, new []interface{}) []FieldChange {
+	var changes []FieldChange
+
+	oldSet := make(map[string]bool, len(old))
+	for _, v := range old {
+		oldSet[fmt.Sprintf("%v", v)] = true
+	}
+	newSet := make(map[string]bool, len(new))
+	for _, v := range new {
+		newSet[fmt.Sprintf("%v", v)] = true
+	}
+
+	// Find removed elements
+	var removed []string
+	for _, v := range old {
+		s := fmt.Sprintf("%v", v)
+		if !newSet[s] {
+			removed = append(removed, s)
+		}
+	}
+
+	// Find added elements
+	var added []string
+	for _, v := range new {
+		s := fmt.Sprintf("%v", v)
+		if !oldSet[s] {
+			added = append(added, s)
+		}
+	}
+
+	if len(removed) > 0 {
+		changes = append(changes, maskFieldChange(FieldChange{
+			Path:     path,
+			OldValue: fmt.Sprintf("[removed: %s]", strings.Join(removed, ", ")),
+			Action:   ActionDelete,
+		}))
+	}
+	if len(added) > 0 {
+		changes = append(changes, maskFieldChange(FieldChange{
+			Path:     path,
+			NewValue: fmt.Sprintf("[added: %s]", strings.Join(added, ", ")),
+			Action:   ActionCreate,
+		}))
+	}
+
+	return changes
+}
+
+// commonKeyFields are fields used to identify and match array elements.
+var commonKeyFields = []string{"name", "id", "protocol", "type"}
+
+// findMatchKey returns the first common key field present in a map element.
+func findMatchKey(m map[string]interface{}) string {
+	for _, key := range commonKeyFields {
+		if _, ok := m[key]; ok {
+			return key
+		}
+	}
+	return ""
+}
+
+// diffMapArrays diffs arrays of maps by matching elements on a common key field.
+// Returns nil if no common key field can be found to match on.
+func diffMapArrays(path string, old, new []interface{}) []FieldChange {
+	// Determine the match key from the first element of either array
+	var matchKey string
+	for _, v := range old {
+		if m, ok := v.(map[string]interface{}); ok {
+			matchKey = findMatchKey(m)
+			break
+		}
+	}
+	if matchKey == "" {
+		for _, v := range new {
+			if m, ok := v.(map[string]interface{}); ok {
+				matchKey = findMatchKey(m)
+				break
+			}
+		}
+	}
+	if matchKey == "" {
+		return nil // no identifiable key, caller should fall back
+	}
+
+	// Index old elements by their match key value
+	oldByKey := make(map[string]map[string]interface{})
+	for _, v := range old {
+		m := v.(map[string]interface{})
+		keyVal := fmt.Sprintf("%v", m[matchKey])
+		oldByKey[keyVal] = m
+	}
+
+	// Index new elements by their match key value
+	newByKey := make(map[string]map[string]interface{})
+	for _, v := range new {
+		m := v.(map[string]interface{})
+		keyVal := fmt.Sprintf("%v", m[matchKey])
+		newByKey[keyVal] = m
+	}
+
+	var changes []FieldChange
+
+	// Collect all keys in order
+	allKeys := map[string]bool{}
+	for k := range oldByKey {
+		allKeys[k] = true
+	}
+	for k := range newByKey {
+		allKeys[k] = true
+	}
+	sortedKeys := make([]string, 0, len(allKeys))
+	for k := range allKeys {
+		sortedKeys = append(sortedKeys, k)
+	}
+	sort.Strings(sortedKeys)
+
+	for _, keyVal := range sortedKeys {
+		elemPath := fmt.Sprintf("%s[%s=%s]", path, matchKey, keyVal)
+		oldElem, oldExists := oldByKey[keyVal]
+		newElem, newExists := newByKey[keyVal]
+
+		switch {
+		case oldExists && !newExists:
+			// Element removed
+			changes = append(changes, maskFieldChange(FieldChange{
+				Path:     elemPath,
+				OldValue: oldElem,
+				Action:   ActionDelete,
+			}))
+		case !oldExists && newExists:
+			// Element added
+			changes = append(changes, maskFieldChange(FieldChange{
+				Path:     elemPath,
+				NewValue: newElem,
+				Action:   ActionCreate,
+			}))
+		case oldExists && newExists:
+			// Both exist — diff field by field
+			elemChanges := diffMaps(elemPath, oldElem, newElem)
+			changes = append(changes, elemChanges...)
 		}
 	}
 
@@ -235,7 +509,7 @@ func flattenFields(prefix string, old, new interface{}, action Action) []FieldCh
 			} else {
 				fc.OldValue = val
 			}
-			changes = append(changes, fc)
+			changes = append(changes, maskFieldChange(fc))
 		}
 	}
 	return changes

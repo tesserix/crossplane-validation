@@ -1,6 +1,7 @@
 package diff
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/tesserix/crossplane-validation/pkg/renderer"
@@ -375,11 +376,390 @@ func TestComputeAzureStorageTierChange(t *testing.T) {
 	}
 }
 
+func TestIsSensitiveField(t *testing.T) {
+	tests := []struct {
+		path     string
+		expected bool
+	}{
+		{"spec.forProvider.password", true},
+		{"spec.forProvider.masterPassword", true},
+		{"spec.forProvider.apiKey", true},
+		{"spec.forProvider.apikey", true},
+		{"spec.forProvider.secretKey", true},
+		{"spec.forProvider.accessKey", true},
+		{"spec.forProvider.privateKey", true},
+		{"spec.forProvider.connectionString", true},
+		{"spec.forProvider.token", true},
+		{"spec.forProvider.secret", true},
+		{"spec.forProvider.credential", true},
+		{"spec.forProvider.cert", true},
+		{"spec.forProvider.certificate", true},
+		{"spec.forProvider.dbPassword", true},
+		{"spec.forProvider.region", false},
+		{"spec.forProvider.cidrBlock", false},
+		{"spec.forProvider.tier", false},
+		{"spec.forProvider.location", false},
+	}
+
+	for _, tc := range tests {
+		got := isSensitiveField(tc.path)
+		if got != tc.expected {
+			t.Errorf("isSensitiveField(%q) = %v, want %v", tc.path, got, tc.expected)
+		}
+	}
+}
+
+func TestSensitiveFieldMaskingOnCreate(t *testing.T) {
+	ShowSensitive = false
+	defer func() { ShowSensitive = false }()
+
+	base := &renderer.RenderedSet{}
+	target := &renderer.RenderedSet{
+		Resources: []renderer.RenderedResource{
+			makeMR("sql.gcp.upbound.io/v1beta2", "DatabaseInstance", "db", map[string]interface{}{
+				"region":         "us-east-1",
+				"masterPassword": "super-secret-123",
+				"apiKey":         "ak_12345",
+			}),
+		},
+	}
+
+	result := Compute(base, target)
+
+	for _, d := range result.Diffs {
+		for _, fc := range d.FieldChanges {
+			if fc.Path == "spec.forProvider.masterPassword" || fc.Path == "spec.forProvider.apiKey" {
+				if fc.NewValue != "(sensitive value)" {
+					t.Errorf("expected masked create value for %s, got %v", fc.Path, fc.NewValue)
+				}
+			}
+			if fc.Path == "spec.forProvider.region" {
+				if fc.NewValue != "us-east-1" {
+					t.Errorf("expected plain region value, got %v", fc.NewValue)
+				}
+			}
+		}
+	}
+}
+
+func TestSensitiveFieldMaskingOnUpdate(t *testing.T) {
+	ShowSensitive = false
+	defer func() { ShowSensitive = false }()
+
+	base := &renderer.RenderedSet{
+		Resources: []renderer.RenderedResource{
+			makeMR("sql.gcp.upbound.io/v1beta2", "DatabaseInstance", "db", map[string]interface{}{
+				"region":   "us-east-1",
+				"password": "old-pass",
+			}),
+		},
+	}
+
+	target := &renderer.RenderedSet{
+		Resources: []renderer.RenderedResource{
+			makeMR("sql.gcp.upbound.io/v1beta2", "DatabaseInstance", "db", map[string]interface{}{
+				"region":   "us-east-1",
+				"password": "new-pass",
+			}),
+		},
+	}
+
+	result := Compute(base, target)
+
+	if result.Summary.ToChange != 1 {
+		t.Fatalf("expected 1 change, got %d", result.Summary.ToChange)
+	}
+
+	fc := result.Diffs[0].FieldChanges[0]
+	if fc.OldValue != "(sensitive value)" {
+		t.Errorf("expected masked old value, got %v", fc.OldValue)
+	}
+	if fc.NewValue != "(sensitive value changed)" {
+		t.Errorf("expected masked new value, got %v", fc.NewValue)
+	}
+}
+
+func TestSensitiveFieldMaskingOnDelete(t *testing.T) {
+	ShowSensitive = false
+	defer func() { ShowSensitive = false }()
+
+	base := &renderer.RenderedSet{
+		Resources: []renderer.RenderedResource{
+			makeMR("sql.gcp.upbound.io/v1beta2", "DatabaseInstance", "db", map[string]interface{}{
+				"region": "us-east-1",
+				"token":  "tok_abc123",
+			}),
+		},
+	}
+
+	target := &renderer.RenderedSet{}
+
+	result := Compute(base, target)
+
+	for _, d := range result.Diffs {
+		for _, fc := range d.FieldChanges {
+			if fc.Path == "spec.forProvider.token" {
+				if fc.OldValue != "(sensitive value removed)" {
+					t.Errorf("expected masked delete value for token, got %v", fc.OldValue)
+				}
+			}
+		}
+	}
+}
+
+func TestShowSensitiveBypassesMasking(t *testing.T) {
+	ShowSensitive = true
+	defer func() { ShowSensitive = false }()
+
+	base := &renderer.RenderedSet{}
+	target := &renderer.RenderedSet{
+		Resources: []renderer.RenderedResource{
+			makeMR("sql.gcp.upbound.io/v1beta2", "DatabaseInstance", "db", map[string]interface{}{
+				"password": "plaintext-pass",
+			}),
+		},
+	}
+
+	result := Compute(base, target)
+
+	for _, d := range result.Diffs {
+		for _, fc := range d.FieldChanges {
+			if fc.Path == "spec.forProvider.password" {
+				if fc.NewValue != "plaintext-pass" {
+					t.Errorf("expected plain value with ShowSensitive=true, got %v", fc.NewValue)
+				}
+			}
+		}
+	}
+}
+
+func TestNamespaceScopedResourcesDontCollide(t *testing.T) {
+	base := &renderer.RenderedSet{
+		Resources: []renderer.RenderedResource{
+			makeMRWithNamespace("v1", "ConfigMap", "config", "namespace-a", map[string]interface{}{
+				"data": "old-a",
+			}),
+			makeMRWithNamespace("v1", "ConfigMap", "config", "namespace-b", map[string]interface{}{
+				"data": "old-b",
+			}),
+		},
+	}
+
+	target := &renderer.RenderedSet{
+		Resources: []renderer.RenderedResource{
+			makeMRWithNamespace("v1", "ConfigMap", "config", "namespace-a", map[string]interface{}{
+				"data": "new-a",
+			}),
+			makeMRWithNamespace("v1", "ConfigMap", "config", "namespace-b", map[string]interface{}{
+				"data": "old-b",
+			}),
+		},
+	}
+
+	result := Compute(base, target)
+
+	if result.Summary.ToChange != 1 {
+		t.Errorf("expected 1 change, got %d", result.Summary.ToChange)
+	}
+	if result.Summary.NoOp != 1 {
+		t.Errorf("expected 1 no-op, got %d", result.Summary.NoOp)
+	}
+
+	// Verify the changed resource is from namespace-a
+	for _, d := range result.Diffs {
+		if d.Action == ActionUpdate {
+			if d.Namespace != "namespace-a" {
+				t.Errorf("expected update in namespace-a, got namespace %q", d.Namespace)
+			}
+		}
+	}
+}
+
+func TestNamespacedResourceKeyFormat(t *testing.T) {
+	r := makeMRWithNamespace("v1", "ConfigMap", "test", "my-ns", nil)
+	key := r.ResourceKey()
+	expected := "v1/ConfigMap/my-ns/test"
+	if key != expected {
+		t.Errorf("ResourceKey() = %q, want %q", key, expected)
+	}
+
+	// Cluster-scoped (no namespace)
+	r2 := makeMR("v1", "Namespace", "test", nil)
+	key2 := r2.ResourceKey()
+	expected2 := "v1/Namespace//test"
+	if key2 != expected2 {
+		t.Errorf("ResourceKey() = %q, want %q", key2, expected2)
+	}
+}
+
+func TestDiffPrimitiveArrays(t *testing.T) {
+	base := &renderer.RenderedSet{
+		Resources: []renderer.RenderedResource{
+			makeMR("compute.gcp.upbound.io/v1beta1", "Firewall", "web", map[string]interface{}{
+				"sourceRanges": []interface{}{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10"},
+			}),
+		},
+	}
+
+	target := &renderer.RenderedSet{
+		Resources: []renderer.RenderedResource{
+			makeMR("compute.gcp.upbound.io/v1beta1", "Firewall", "web", map[string]interface{}{
+				"sourceRanges": []interface{}{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "203.0.113.0/24"},
+			}),
+		},
+	}
+
+	result := Compute(base, target)
+
+	if result.Summary.ToChange != 1 {
+		t.Fatalf("expected 1 change, got %d", result.Summary.ToChange)
+	}
+
+	changes := result.Diffs[0].FieldChanges
+	// Should have separate add and remove entries, not an atomic update
+	hasAdd := false
+	hasRemove := false
+	for _, fc := range changes {
+		if fc.Action == ActionCreate {
+			hasAdd = true
+			newVal, ok := fc.NewValue.(string)
+			if !ok || !containsSubstring(newVal, "203.0.113.0/24") {
+				t.Errorf("expected added element 203.0.113.0/24, got %v", fc.NewValue)
+			}
+		}
+		if fc.Action == ActionDelete {
+			hasRemove = true
+			oldVal, ok := fc.OldValue.(string)
+			if !ok || !containsSubstring(oldVal, "100.64.0.0/10") {
+				t.Errorf("expected removed element 100.64.0.0/10, got %v", fc.OldValue)
+			}
+		}
+	}
+	if !hasAdd || !hasRemove {
+		t.Errorf("expected both add and remove changes for primitive array diff, got changes: %+v", changes)
+	}
+}
+
+func TestDiffShortArraysAtomic(t *testing.T) {
+	base := &renderer.RenderedSet{
+		Resources: []renderer.RenderedResource{
+			makeMR("compute.gcp.upbound.io/v1beta1", "Firewall", "web", map[string]interface{}{
+				"sourceRanges": []interface{}{"10.0.0.0/8"},
+			}),
+		},
+	}
+
+	target := &renderer.RenderedSet{
+		Resources: []renderer.RenderedResource{
+			makeMR("compute.gcp.upbound.io/v1beta1", "Firewall", "web", map[string]interface{}{
+				"sourceRanges": []interface{}{"192.168.0.0/16"},
+			}),
+		},
+	}
+
+	result := Compute(base, target)
+
+	if result.Summary.ToChange != 1 {
+		t.Fatalf("expected 1 change, got %d", result.Summary.ToChange)
+	}
+
+	// Short arrays should produce a single atomic update
+	changes := result.Diffs[0].FieldChanges
+	if len(changes) != 1 {
+		t.Fatalf("expected 1 field change for short array, got %d", len(changes))
+	}
+	if changes[0].Action != ActionUpdate {
+		t.Errorf("expected update action for short array, got %s", changes[0].Action)
+	}
+}
+
+func TestDiffMapArraysByKey(t *testing.T) {
+	// Use unique keys per element so matching works cleanly.
+	// Need 4+ elements per array to bypass the short-array atomic fallback.
+	base := &renderer.RenderedSet{
+		Resources: []renderer.RenderedResource{
+			makeMR("ec2.aws.upbound.io/v1beta1", "SecurityGroup", "web-sg", map[string]interface{}{
+				"ingress": []interface{}{
+					map[string]interface{}{"protocol": "tcp", "fromPort": float64(80), "toPort": float64(80), "cidr": "0.0.0.0/0"},
+					map[string]interface{}{"protocol": "udp", "fromPort": float64(53), "toPort": float64(53), "cidr": "10.0.0.0/8"},
+					map[string]interface{}{"protocol": "ssh", "fromPort": float64(22), "toPort": float64(22), "cidr": "10.0.0.0/8"},
+					map[string]interface{}{"protocol": "dns", "fromPort": float64(53), "toPort": float64(53), "cidr": "10.0.0.0/8"},
+				},
+			}),
+		},
+	}
+
+	target := &renderer.RenderedSet{
+		Resources: []renderer.RenderedResource{
+			makeMR("ec2.aws.upbound.io/v1beta1", "SecurityGroup", "web-sg", map[string]interface{}{
+				"ingress": []interface{}{
+					map[string]interface{}{"protocol": "tcp", "fromPort": float64(80), "toPort": float64(80), "cidr": "10.0.0.0/8"},
+					map[string]interface{}{"protocol": "udp", "fromPort": float64(53), "toPort": float64(53), "cidr": "10.0.0.0/8"},
+					map[string]interface{}{"protocol": "icmp", "fromPort": float64(-1), "toPort": float64(-1), "cidr": "10.0.0.0/8"},
+					map[string]interface{}{"protocol": "dns", "fromPort": float64(53), "toPort": float64(53), "cidr": "10.0.0.0/8"},
+				},
+			}),
+		},
+	}
+
+	result := Compute(base, target)
+
+	if result.Summary.ToChange != 1 {
+		t.Fatalf("expected 1 change, got %d", result.Summary.ToChange)
+	}
+
+	changes := result.Diffs[0].FieldChanges
+	// tcp matched by key: cidr changed. ssh removed. icmp added.
+	hasFieldUpdate := false
+	hasRemove := false
+	hasAdd := false
+	for _, fc := range changes {
+		if fc.Action == ActionUpdate {
+			hasFieldUpdate = true
+		}
+		if fc.Action == ActionDelete {
+			hasRemove = true
+		}
+		if fc.Action == ActionCreate {
+			hasAdd = true
+		}
+	}
+	if !hasFieldUpdate {
+		t.Errorf("expected field-level update for matched map element, changes: %+v", changes)
+	}
+	if !hasRemove {
+		t.Errorf("expected remove for unmatched old element, changes: %+v", changes)
+	}
+	if !hasAdd {
+		t.Errorf("expected add for unmatched new element, changes: %+v", changes)
+	}
+}
+
+func containsSubstring(s, substr string) bool {
+	return strings.Contains(s, substr)
+}
+
 func makeMR(apiVersion, kind, name string, forProvider map[string]interface{}) renderer.RenderedResource {
 	obj := map[string]interface{}{
 		"apiVersion": apiVersion,
 		"kind":       kind,
 		"metadata":   map[string]interface{}{"name": name},
+		"spec":       map[string]interface{}{"forProvider": forProvider},
+	}
+	return renderer.RenderedResource{
+		Source:   "direct",
+		Resource: unstructured.Unstructured{Object: obj},
+	}
+}
+
+func makeMRWithNamespace(apiVersion, kind, name, namespace string, forProvider map[string]interface{}) renderer.RenderedResource {
+	if forProvider == nil {
+		forProvider = map[string]interface{}{}
+	}
+	obj := map[string]interface{}{
+		"apiVersion": apiVersion,
+		"kind":       kind,
+		"metadata":   map[string]interface{}{"name": name, "namespace": namespace},
 		"spec":       map[string]interface{}{"forProvider": forProvider},
 	}
 	return renderer.RenderedResource{

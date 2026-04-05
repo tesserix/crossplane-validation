@@ -1,8 +1,10 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -10,10 +12,12 @@ import (
 	"github.com/tesserix/crossplane-validation/pkg/config"
 	"github.com/tesserix/crossplane-validation/pkg/diff"
 	"github.com/tesserix/crossplane-validation/pkg/hcl"
+	"github.com/tesserix/crossplane-validation/pkg/lint"
 	"github.com/tesserix/crossplane-validation/pkg/manifest"
 	"github.com/tesserix/crossplane-validation/pkg/plan"
 	"github.com/tesserix/crossplane-validation/pkg/renderer"
 	"github.com/tesserix/crossplane-validation/pkg/tofu"
+	"github.com/tesserix/crossplane-validation/pkg/validate"
 )
 
 var version = "dev"
@@ -29,6 +33,8 @@ func main() {
 	root.AddCommand(diffCmd())
 	root.AddCommand(renderCmd())
 	root.AddCommand(scanCmd())
+	root.AddCommand(validateCmd())
+	root.AddCommand(lintCmd())
 
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
@@ -37,12 +43,14 @@ func main() {
 
 func planCmd() *cobra.Command {
 	var (
-		baseBranch  string
-		targetRef   string
-		configFile  string
-		outputFmt   string
-		manifestDir string
-		cloudMode   bool
+		baseBranch       string
+		targetRef        string
+		configFile       string
+		outputFmt        string
+		manifestDir      string
+		cloudMode        bool
+		detailedExitcode bool
+		showSensitive    bool
 	)
 
 	cmd := &cobra.Command{
@@ -84,6 +92,8 @@ With --cloud, converts to HCL and runs OpenTofu plan with read-only credentials 
 				return fmt.Errorf("rendering target: %w", err)
 			}
 
+			diff.ShowSensitive = showSensitive
+
 			fmt.Fprintln(os.Stderr, "Computing structural diff...")
 			structDiff := diff.Compute(baseRendered, targetRendered)
 
@@ -108,12 +118,26 @@ With --cloud, converts to HCL and runs OpenTofu plan with read-only credentials 
 				}
 			}
 
+			fmt.Fprintln(os.Stderr, "Validating schemas...")
+			validationIssues := validate.Validate(targetManifests)
+
 			result := &plan.Result{
-				StructuralDiff: structDiff,
-				CloudPlan:      cloudPlan,
+				StructuralDiff:   structDiff,
+				CloudPlan:        cloudPlan,
+				ValidationIssues: validationIssues,
 			}
 
-			return plan.Render(result, outputFmt, os.Stdout)
+			if err := plan.Render(result, outputFmt, os.Stdout); err != nil {
+				return err
+			}
+
+			if detailedExitcode {
+				if structDiff.Summary.ToAdd > 0 || structDiff.Summary.ToChange > 0 || structDiff.Summary.ToDelete > 0 {
+					os.Exit(2)
+				}
+			}
+
+			return nil
 		},
 	}
 
@@ -123,6 +147,8 @@ With --cloud, converts to HCL and runs OpenTofu plan with read-only credentials 
 	cmd.Flags().StringVarP(&outputFmt, "output", "o", "terminal", "Output format: terminal, markdown, json")
 	cmd.Flags().StringVarP(&manifestDir, "manifests", "m", "", "Manifest directory (overrides config)")
 	cmd.Flags().BoolVar(&cloudMode, "cloud", false, "Enable cloud-aware plan using OpenTofu (requires credentials)")
+	cmd.Flags().BoolVar(&detailedExitcode, "detailed-exitcode", false, "Return exit code 2 when changes are detected (0=no changes, 1=error, 2=changes)")
+	cmd.Flags().BoolVar(&showSensitive, "show-sensitive", false, "Show sensitive field values in plain text (passwords, tokens, keys)")
 
 	return cmd
 }
@@ -192,6 +218,207 @@ func renderCmd() *cobra.Command {
 
 	cmd.Flags().StringVarP(&functionsDir, "functions", "f", "", "Directory containing Function definitions (auto-detected if in same tree)")
 	return cmd
+}
+
+func validateCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "validate [path...]",
+		Short: "Validate XRs and Claims against their XRD schemas",
+		Long: `Scans directories for Crossplane manifests and validates:
+- XRs/Claims against their XRD openAPIV3Schema (required fields, enum values, type mismatches)
+- ProviderConfig references exist in the scanned manifests
+- Composition references match XR types`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			dirs := []string{"."}
+			if len(args) > 0 {
+				dirs = args
+			}
+
+			rs, err := manifest.Scan(dirs)
+			if err != nil {
+				return fmt.Errorf("scanning manifests: %w", err)
+			}
+
+			fmt.Fprintf(os.Stderr, "Scanned %d resources\n", len(rs.AllResources()))
+
+			issues := validate.Validate(rs)
+
+			if len(issues) == 0 {
+				fmt.Fprintln(os.Stdout, "No validation issues found.")
+				return nil
+			}
+
+			errorCount := 0
+			warningCount := 0
+
+			fmt.Fprintln(os.Stdout)
+			fmt.Fprintln(os.Stdout, "Errors:")
+			for _, issue := range issues {
+				if issue.Severity != "error" {
+					continue
+				}
+				errorCount++
+				field := issue.Field
+				if field != "" {
+					field = " " + field + ":"
+				}
+				fmt.Fprintf(os.Stdout, "  \u2717 %s%s %s\n", issue.Resource, field, issue.Message)
+			}
+			if errorCount == 0 {
+				fmt.Fprintln(os.Stdout, "  (none)")
+			}
+
+			fmt.Fprintln(os.Stdout)
+			fmt.Fprintln(os.Stdout, "Warnings:")
+			for _, issue := range issues {
+				if issue.Severity != "warning" {
+					continue
+				}
+				warningCount++
+				field := issue.Field
+				if field != "" {
+					field = " " + field + ":"
+				}
+				fmt.Fprintf(os.Stdout, "  \u26a0 %s%s %s\n", issue.Resource, field, issue.Message)
+			}
+			if warningCount == 0 {
+				fmt.Fprintln(os.Stdout, "  (none)")
+			}
+
+			fmt.Fprintf(os.Stdout, "\nTotal: %d errors, %d warnings\n", errorCount, warningCount)
+
+			if errorCount > 0 {
+				os.Exit(1)
+			}
+
+			return nil
+		},
+	}
+}
+
+func lintCmd() *cobra.Command {
+	var (
+		tools     []string
+		outputFmt string
+	)
+
+	cmd := &cobra.Command{
+		Use:   "lint [path...]",
+		Short: "Run external linting and validation tools on manifests",
+		Long: `Wraps popular open-source tools for comprehensive YAML and Kubernetes validation.
+
+Automatically detects and runs available tools:
+  yamllint             YAML syntax and style validation
+  kubeconform          Kubernetes manifest schema validation
+  pluto                Deprecated API version detection
+  kube-linter          Kubernetes best practices and security analysis
+  crossplane-validate  Crossplane composition and XRD validation (crossplane CLI)
+
+Install tools individually: brew install yamllint kubeconform pluto kube-linter
+Use --tools to run specific tools: --tools=yamllint,kubeconform`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			dirs := []string{"."}
+			if len(args) > 0 {
+				dirs = args
+			}
+
+			// Show available tools
+			available := lint.DetectTools()
+			fmt.Fprintln(os.Stderr, "Tool detection:")
+			for _, t := range lint.AvailableTools() {
+				status := "not found"
+				if available[t.Name] {
+					status = "available"
+				}
+				fmt.Fprintf(os.Stderr, "  %-22s %s (%s)\n", t.Name, t.Purpose, status)
+			}
+			fmt.Fprintln(os.Stderr)
+
+			result, err := lint.Run(dirs, tools)
+			if err != nil {
+				return fmt.Errorf("running lint: %w", err)
+			}
+
+			if len(result.Tools) == 0 {
+				fmt.Fprintln(os.Stdout, "No external tools available. Install with:")
+				fmt.Fprintln(os.Stdout, "  brew install yamllint kubeconform kube-linter")
+				fmt.Fprintln(os.Stdout, "  brew install FairwindsOps/tap/pluto")
+				return nil
+			}
+
+			if outputFmt == "json" {
+				return renderLintJSON(result, os.Stdout)
+			}
+
+			return renderLintTerminal(result, os.Stdout)
+		},
+	}
+
+	cmd.Flags().StringSliceVar(&tools, "tools", nil, "Specific tools to run (comma-separated)")
+	cmd.Flags().StringVarP(&outputFmt, "output", "o", "terminal", "Output format: terminal, json")
+	return cmd
+}
+
+func renderLintTerminal(result *lint.Result, w *os.File) error {
+	fmt.Fprintf(w, "Tools run: %s\n\n", strings.Join(result.Tools, ", "))
+
+	if len(result.Issues) == 0 {
+		fmt.Fprintln(w, "No issues found.")
+		return nil
+	}
+
+	errorCount, warningCount := 0, 0
+	// Group by tool
+	byTool := map[string][]lint.Issue{}
+	for _, issue := range result.Issues {
+		byTool[issue.Tool] = append(byTool[issue.Tool], issue)
+		if issue.Severity == "error" {
+			errorCount++
+		} else {
+			warningCount++
+		}
+	}
+
+	for _, toolName := range result.Tools {
+		issues := byTool[toolName]
+		if len(issues) == 0 {
+			fmt.Fprintf(w, "%s: no issues\n\n", toolName)
+			continue
+		}
+
+		fmt.Fprintf(w, "%s (%d issues)\n", toolName, len(issues))
+		for _, issue := range issues {
+			prefix := "\u26a0"
+			if issue.Severity == "error" {
+				prefix = "\u2717"
+			}
+			loc := ""
+			if issue.File != "" {
+				loc = issue.File
+				if issue.Resource != "" {
+					loc += " " + issue.Resource
+				}
+				loc += ": "
+			} else if issue.Resource != "" {
+				loc = issue.Resource + ": "
+			}
+			fmt.Fprintf(w, "  %s %s%s\n", prefix, loc, issue.Message)
+		}
+		fmt.Fprintln(w)
+	}
+
+	fmt.Fprintf(w, "Total: %d errors, %d warnings\n", errorCount, warningCount)
+
+	if errorCount > 0 {
+		os.Exit(1)
+	}
+	return nil
+}
+
+func renderLintJSON(result *lint.Result, w *os.File) error {
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	return enc.Encode(result)
 }
 
 func scanCmd() *cobra.Command {

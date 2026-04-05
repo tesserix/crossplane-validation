@@ -124,7 +124,7 @@ func TestRenderResourceKey(t *testing.T) {
 	}
 
 	key := r.ResourceKey()
-	expected := "s3.aws.upbound.io/v1beta1/Bucket/my-bucket"
+	expected := "s3.aws.upbound.io/v1beta1/Bucket//my-bucket"
 	if key != expected {
 		t.Errorf("ResourceKey() = %q, want %q", key, expected)
 	}
