@@ -7,7 +7,7 @@ spec:
     resourceGroupNameRef:
       name: app-rg
     location: eastus
-    size: Standard_B2s
+    size: Standard_D4s_v3
     adminUsername: azureuser
     networkInterfaceIdRefs:
       - name: app-nic

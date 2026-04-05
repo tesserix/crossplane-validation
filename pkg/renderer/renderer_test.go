@@ -169,8 +169,8 @@ func TestRenderMultiProviderFromTestdata(t *testing.T) {
 		t.Fatalf("render failed: %v", err)
 	}
 
-	if len(rendered.Resources) != 25 {
-		t.Errorf("expected 25 rendered resources from all providers, got %d", len(rendered.Resources))
+	if len(rendered.Resources) != 26 {
+		t.Errorf("expected 26 rendered resources from all providers, got %d", len(rendered.Resources))
 		for _, r := range rendered.Resources {
 			t.Logf("  %s: %s/%s", r.Source, r.Resource.GetKind(), r.Resource.GetName())
 		}
@@ -192,8 +192,8 @@ func TestRenderMultiProviderFromTestdata(t *testing.T) {
 	if providers["aws"] != 10 {
 		t.Errorf("expected 10 AWS resources, got %d", providers["aws"])
 	}
-	if providers["gcp"] != 9 {
-		t.Errorf("expected 9 GCP resources, got %d", providers["gcp"])
+	if providers["gcp"] != 10 {
+		t.Errorf("expected 10 GCP resources, got %d", providers["gcp"])
 	}
 	if providers["azure"] != 6 {
 		t.Errorf("expected 6 Azure resources, got %d", providers["azure"])

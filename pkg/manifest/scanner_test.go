@@ -40,8 +40,8 @@ func TestScanGCPManifests(t *testing.T) {
 		t.Fatalf("scanning GCP manifests: %v", err)
 	}
 
-	if got := len(rs.ManagedResources); got != 9 {
-		t.Errorf("expected 9 GCP managed resources, got %d", got)
+	if got := len(rs.ManagedResources); got != 10 {
+		t.Errorf("expected 10 GCP managed resources, got %d", got)
 		for _, mr := range rs.ManagedResources {
 			t.Logf("  %s/%s (%s)", mr.GetKind(), mr.GetName(), mr.GetAPIVersion())
 		}
@@ -92,8 +92,8 @@ func TestScanMultiProvider(t *testing.T) {
 	}
 
 	total := len(rs.ManagedResources)
-	if total != 25 {
-		t.Errorf("expected 25 total managed resources, got %d", total)
+	if total != 26 {
+		t.Errorf("expected 26 total managed resources, got %d", total)
 	}
 
 	if len(rs.ProviderConfigs) != 0 {

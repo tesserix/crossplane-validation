@@ -41,3 +41,15 @@ spec:
       - 10.0.0.0/8
   providerConfigRef:
     name: default
+---
+apiVersion: compute.gcp.upbound.io/v1beta1
+kind: GlobalAddress
+metadata:
+  name: api-gateway-ip
+spec:
+  forProvider:
+    project: my-gcp-project
+    addressType: EXTERNAL
+    ipVersion: IPV4
+  providerConfigRef:
+    name: default
