@@ -21,13 +21,15 @@ import (
 type Client struct {
 	baseURL    string
 	httpClient *http.Client
+	apiToken   string
 }
 
 // ConnectOptions configures the client connection.
 type ConnectOptions struct {
-	Address string
-	Timeout time.Duration
-	TLS     bool
+	Address  string
+	Timeout  time.Duration
+	TLS      bool
+	APIToken string
 }
 
 // Connect establishes a connection to the operator.
@@ -46,6 +48,7 @@ func Connect(ctx context.Context, opts ConnectOptions) (*Client, error) {
 		httpClient: &http.Client{
 			Timeout: opts.Timeout,
 		},
+		apiToken: opts.APIToken,
 	}
 
 	healthCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -133,6 +136,7 @@ func (c *Client) get(ctx context.Context, path string, result interface{}) error
 	if err != nil {
 		return err
 	}
+	c.setAuth(req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -163,6 +167,7 @@ func (c *Client) post(ctx context.Context, path string, data []byte, result inte
 		return err
 	}
 	req.Header.Set("Content-Type", "application/x-yaml")
+	c.setAuth(req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -185,6 +190,12 @@ func (c *Client) post(ctx context.Context, path string, data []byte, result inte
 	}
 
 	return json.Unmarshal(body, result)
+}
+
+func (c *Client) setAuth(req *http.Request) {
+	if c.apiToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.apiToken)
+	}
 }
 
 // LivePlanResult holds the plan output along with drift warnings and cluster metadata.

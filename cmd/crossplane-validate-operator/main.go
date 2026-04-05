@@ -31,26 +31,28 @@ var version = "dev"
 
 func main() {
 	var (
-		grpcPort       int
+		apiPort        int
 		healthPort     int
 		watchGroups    string
 		kubeconfig     string
 		logLevel       string
 		slackURL       string
 		teamsURL       string
+		apiToken       string
 		leaderElect    bool
 		leaderLockName string
 		podName        string
 		podNamespace   string
 	)
 
-	flag.IntVar(&grpcPort, "grpc-port", 9443, "gRPC server port")
+	flag.IntVar(&apiPort, "grpc-port", 9443, "API server port")
 	flag.IntVar(&healthPort, "health-port", 8081, "Health check HTTP port")
 	flag.StringVar(&watchGroups, "watch-groups", "", "Additional API groups to watch (comma-separated)")
 	flag.StringVar(&kubeconfig, "kubeconfig", "", "Path to kubeconfig (uses in-cluster config if empty)")
 	flag.StringVar(&logLevel, "log-level", "info", "Log level (debug, info, warn, error)")
 	flag.StringVar(&slackURL, "slack-webhook", "", "Slack webhook URL for notifications")
 	flag.StringVar(&teamsURL, "teams-webhook", "", "Teams webhook URL for notifications")
+	flag.StringVar(&apiToken, "api-token", os.Getenv("API_TOKEN"), "Bearer token for API authentication (required for external access)")
 	flag.BoolVar(&leaderElect, "leader-elect", false, "Enable leader election for HA deployments")
 	flag.StringVar(&leaderLockName, "leader-lock-name", "crossplane-validate-operator", "Leader election lock name")
 	flag.StringVar(&podName, "pod-name", os.Getenv("POD_NAME"), "Pod name (from downward API)")
@@ -97,16 +99,11 @@ func main() {
 		notifier = notify.NewMultiNotifier(notifiers...)
 	}
 
-	server := grpcpkg.NewServer(grpcpkg.ServerConfig{
-		Cache:    cache,
-		Port:     grpcPort,
-		Notifier: notifier,
-	})
-
 	httpAPI := grpcpkg.NewHTTPServer(grpcpkg.HTTPServerConfig{
 		Cache:    cache,
-		Port:     grpcPort,
+		Port:     apiPort,
 		Notifier: notifier,
+		APIToken: apiToken,
 	})
 
 	var ready atomic.Bool
@@ -114,11 +111,9 @@ func main() {
 
 	go func() {
 		if err := httpAPI.Start(); err != nil {
-			errCh <- fmt.Errorf("HTTP API server: %w", err)
+			errCh <- fmt.Errorf("API server: %w", err)
 		}
 	}()
-
-	_ = server // gRPC server reserved for proto-based clients
 
 	healthSrv := startHealthServer(healthPort, cache, &ready)
 
@@ -130,8 +125,8 @@ func main() {
 			return
 		}
 		ready.Store(true)
-		log.Printf("operator ready — gRPC :%d, health :%d, cached %d resources",
-			grpcPort, healthPort, cache.ResourceCount())
+		log.Printf("operator ready — API :%d, health :%d, cached %d resources",
+			apiPort, healthPort, cache.ResourceCount())
 
 		<-ctx.Done()
 	}
@@ -205,10 +200,10 @@ func main() {
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
 
+	httpAPI.Stop()
 	if err := healthSrv.Shutdown(shutdownCtx); err != nil {
 		log.Printf("health server shutdown: %v", err)
 	}
-	httpAPI.Stop()
 	cache.Stop()
 }
 

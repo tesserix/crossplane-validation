@@ -14,12 +14,11 @@ import (
 )
 
 // HTTPServer serves the validation API over HTTP/JSON.
-// This runs alongside the gRPC server for CLI connectivity
-// without requiring protobuf code generation.
 type HTTPServer struct {
-	service *ValidationServiceImpl
-	server  *http.Server
-	port    int
+	service  *ValidationServiceImpl
+	server   *http.Server
+	port     int
+	apiToken string
 }
 
 // HTTPServerConfig holds the configuration for the HTTP API server.
@@ -27,6 +26,7 @@ type HTTPServerConfig struct {
 	Cache    *operator.StateCache
 	Port     int
 	Notifier notify.Notifier
+	APIToken string
 }
 
 // NewHTTPServer creates an HTTP API server.
@@ -36,7 +36,8 @@ func NewHTTPServer(cfg HTTPServerConfig) *HTTPServer {
 			cache:    cfg.Cache,
 			notifier: cfg.Notifier,
 		},
-		port: cfg.Port,
+		port:     cfg.Port,
+		apiToken: cfg.APIToken,
 	}
 }
 
@@ -44,10 +45,10 @@ func NewHTTPServer(cfg HTTPServerConfig) *HTTPServer {
 func (s *HTTPServer) Start() error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/health", s.handleHealth)
-	mux.HandleFunc("/api/v1/state", s.handleGetClusterState)
-	mux.HandleFunc("/api/v1/plan", s.handleComputePlan)
-	mux.HandleFunc("/api/v1/drift", s.handleGetDrift)
-	mux.HandleFunc("/api/v1/resource", s.handleGetResourceStatus)
+	mux.HandleFunc("/api/v1/state", s.requireAuth(s.handleGetClusterState))
+	mux.HandleFunc("/api/v1/plan", s.requireAuth(s.handleComputePlan))
+	mux.HandleFunc("/api/v1/drift", s.requireAuth(s.handleGetDrift))
+	mux.HandleFunc("/api/v1/resource", s.requireAuth(s.handleGetResourceStatus))
 
 	s.server = &http.Server{
 		Addr:              fmt.Sprintf(":%d", s.port),
@@ -160,4 +161,36 @@ func writeError(w http.ResponseWriter, code int, err error) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+}
+
+// requireAuth wraps a handler with bearer token authentication.
+// If no API token is configured, all requests are allowed (in-cluster use).
+// When a token is set, requests must include "Authorization: Bearer <token>".
+func (s *HTTPServer) requireAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if s.apiToken == "" {
+			next(w, r)
+			return
+		}
+
+		auth := r.Header.Get("Authorization")
+		if auth == "" {
+			writeError(w, http.StatusUnauthorized, fmt.Errorf("authorization header required"))
+			return
+		}
+
+		const prefix = "Bearer "
+		if len(auth) < len(prefix) || auth[:len(prefix)] != prefix {
+			writeError(w, http.StatusUnauthorized, fmt.Errorf("bearer token required"))
+			return
+		}
+
+		token := auth[len(prefix):]
+		if token != s.apiToken {
+			writeError(w, http.StatusForbidden, fmt.Errorf("invalid token"))
+			return
+		}
+
+		next(w, r)
+	}
 }
