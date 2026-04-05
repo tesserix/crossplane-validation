@@ -10,12 +10,12 @@ import (
 
 // ComposedChange represents a predicted change to a composed resource.
 type ComposedChange struct {
-	ResourceKind    string        `json:"resourceKind"`
-	ResourceName    string        `json:"resourceName"`
-	APIVersion      string        `json:"apiVersion"`
-	CompositionStep string        `json:"compositionStep"`
+	ResourceKind    string                `json:"resourceKind"`
+	ResourceName    string                `json:"resourceName"`
+	APIVersion      string                `json:"apiVersion"`
+	CompositionStep string                `json:"compositionStep"`
 	FieldChanges    []ComposedFieldChange `json:"fieldChanges"`
-	Depth           int           `json:"depth"`
+	Depth           int                   `json:"depth"`
 }
 
 // ComposedFieldChange represents a single predicted field change in a composed resource.

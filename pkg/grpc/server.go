@@ -498,7 +498,6 @@ type ComputePlanResponse struct {
 	ClusterInfo      *ClusterInfo
 }
 
-
 // ClusterInfo contains metadata about the operator's cluster connection.
 type ClusterInfo struct {
 	CachedResources int32
@@ -584,7 +583,6 @@ type GetResourceStatusResponse struct {
 	Resource *Resource
 	Children []*Resource
 }
-
 
 // convertTree converts an operator ResourceTreeNode to the server's type.
 func convertTree(node *operator.ResourceTreeNode) *ResourceTreeNode {
