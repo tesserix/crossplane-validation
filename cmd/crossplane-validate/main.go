@@ -98,23 +98,33 @@ With --cloud, converts to HCL and runs OpenTofu plan with read-only credentials 
 			structDiff := diff.Compute(baseRendered, targetRendered)
 
 			var cloudPlan *tofu.PlanResult
-			if cloudMode && cfg.HasCloudCredentials() {
-				fmt.Fprintln(os.Stderr, "Loading provider schemas...")
-				hcl.UseSchemaLookup = true
-				fmt.Fprintln(os.Stderr, "Converting to HCL...")
-				baseHCL, err := hcl.Convert(baseRendered, cfg.Providers)
-				if err != nil {
-					return fmt.Errorf("converting base to HCL: %w", err)
-				}
-				targetHCL, err := hcl.Convert(targetRendered, cfg.Providers)
-				if err != nil {
-					return fmt.Errorf("converting target to HCL: %w", err)
-				}
+			if cloudMode {
+				if !cfg.HasCloudCredentials() {
+					fmt.Fprintln(os.Stderr, "Cloud mode: no credentials detected")
+					fmt.Fprintln(os.Stderr, "  Checked: AWS_ACCESS_KEY_ID, AWS_PROFILE, GOOGLE_APPLICATION_CREDENTIALS,")
+					fmt.Fprintln(os.Stderr, "           ARM_CLIENT_ID, ARM_SUBSCRIPTION_ID, OIDC tokens")
+					fmt.Fprintln(os.Stderr, "  Tip: authenticate with your cloud provider or set credentials in .crossplane-validate.yml")
+					fmt.Fprintln(os.Stderr, "  Skipping cloud plan.")
+				} else {
+					printDetectedAuth(cfg)
 
-				fmt.Fprintln(os.Stderr, "Running cloud plan (read-only)...")
-				cloudPlan, err = tofu.Plan(baseHCL, targetHCL, cfg.Providers)
-				if err != nil {
-					return fmt.Errorf("running cloud plan: %w", err)
+					fmt.Fprintln(os.Stderr, "Loading provider schemas...")
+					hcl.UseSchemaLookup = true
+					fmt.Fprintln(os.Stderr, "Converting to HCL...")
+					baseHCL, err := hcl.Convert(baseRendered, cfg.Providers)
+					if err != nil {
+						return fmt.Errorf("converting base to HCL: %w", err)
+					}
+					targetHCL, err := hcl.Convert(targetRendered, cfg.Providers)
+					if err != nil {
+						return fmt.Errorf("converting target to HCL: %w", err)
+					}
+
+					fmt.Fprintln(os.Stderr, "Running cloud plan (read-only)...")
+					cloudPlan, err = tofu.Plan(baseHCL, targetHCL, cfg.Providers)
+					if err != nil {
+						return fmt.Errorf("running cloud plan: %w", err)
+					}
 				}
 			}
 
@@ -419,6 +429,50 @@ func renderLintJSON(result *lint.Result, w *os.File) error {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	return enc.Encode(result)
+}
+
+func printDetectedAuth(cfg *config.Config) {
+	fmt.Fprintln(os.Stderr, "Cloud authentication:")
+
+	// Check explicit config
+	for name, prov := range cfg.Providers {
+		if prov.Credentials != "" {
+			fmt.Fprintf(os.Stderr, "  %-12s %s (from config)\n", name+":", prov.Credentials)
+		}
+	}
+
+	// Auto-detect from environment
+	if os.Getenv("AWS_ACCESS_KEY_ID") != "" {
+		fmt.Fprintln(os.Stderr, "  aws:         access key (env)")
+	} else if os.Getenv("AWS_PROFILE") != "" {
+		fmt.Fprintf(os.Stderr, "  aws:         profile %q (env)\n", os.Getenv("AWS_PROFILE"))
+	} else if os.Getenv("AWS_WEB_IDENTITY_TOKEN_FILE") != "" {
+		fmt.Fprintln(os.Stderr, "  aws:         OIDC web identity (env)")
+	} else if os.Getenv("AWS_ROLE_ARN") != "" {
+		fmt.Fprintln(os.Stderr, "  aws:         assume role (env)")
+	}
+
+	if os.Getenv("GOOGLE_APPLICATION_CREDENTIALS") != "" {
+		fmt.Fprintln(os.Stderr, "  gcp:         service account key (env)")
+	} else if os.Getenv("GOOGLE_CREDENTIALS") != "" {
+		fmt.Fprintln(os.Stderr, "  gcp:         inline credentials (env)")
+	} else if os.Getenv("CLOUDSDK_CONFIG") != "" {
+		fmt.Fprintln(os.Stderr, "  gcp:         gcloud CLI (env)")
+	}
+
+	if os.Getenv("ARM_USE_OIDC") != "" || os.Getenv("ACTIONS_ID_TOKEN_REQUEST_URL") != "" {
+		fmt.Fprintln(os.Stderr, "  azure:       OIDC federation (env)")
+	} else if os.Getenv("ARM_USE_MSI") != "" {
+		fmt.Fprintln(os.Stderr, "  azure:       managed identity (env)")
+	} else if os.Getenv("ARM_USE_CLI") != "" {
+		fmt.Fprintln(os.Stderr, "  azure:       CLI credentials (env)")
+	} else if os.Getenv("ARM_CLIENT_ID") != "" {
+		fmt.Fprintln(os.Stderr, "  azure:       service principal (env)")
+	} else if os.Getenv("ARM_SUBSCRIPTION_ID") != "" {
+		fmt.Fprintln(os.Stderr, "  azure:       subscription detected (env)")
+	}
+
+	fmt.Fprintln(os.Stderr)
 }
 
 func scanCmd() *cobra.Command {
