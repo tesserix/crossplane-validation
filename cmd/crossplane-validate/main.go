@@ -176,7 +176,7 @@ func renderCmd() *cobra.Command {
 				dirs = append(dirs, functionsDir)
 			}
 
-			manifests, err := manifest.Scan(dirs)
+			manifests, err := manifest.ScanWithKustomize(dirs)
 			if err != nil {
 				return err
 			}
@@ -205,7 +205,7 @@ func scanCmd() *cobra.Command {
 			}
 
 			dir := dirs[0]
-			rs, err := manifest.Scan(dirs)
+			rs, err := manifest.ScanWithKustomize(dirs)
 			if err != nil {
 				return err
 			}

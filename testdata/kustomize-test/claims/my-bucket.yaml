@@ -1,0 +1,8 @@
+apiVersion: test.example.org/v1alpha1
+kind: XBucket
+metadata:
+  name: my-app-bucket
+spec:
+  compositionRef:
+    name: xbucket-composition
+  region: eu-west-1

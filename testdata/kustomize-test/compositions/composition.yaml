@@ -1,0 +1,28 @@
+apiVersion: apiextensions.crossplane.io/v1
+kind: Composition
+metadata:
+  name: xbucket-composition
+spec:
+  compositeTypeRef:
+    apiVersion: test.example.org/v1alpha1
+    kind: XBucket
+  mode: Pipeline
+  pipeline:
+    - step: create-bucket
+      functionRef:
+        name: function-patch-and-transform
+      input:
+        apiVersion: pt.fn.crossplane.io/v1beta1
+        kind: Resources
+        resources:
+          - name: bucket
+            base:
+              apiVersion: s3.aws.upbound.io/v1beta1
+              kind: Bucket
+              spec:
+                forProvider:
+                  region: us-east-1
+            patches:
+              - type: FromCompositeFieldPath
+                fromFieldPath: spec.region
+                toFieldPath: spec.forProvider.region
