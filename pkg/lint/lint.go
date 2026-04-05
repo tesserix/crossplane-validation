@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -45,7 +47,22 @@ func AvailableTools() []Tool {
 }
 
 // Run executes all available tools (or a specific subset) against the given directories.
-func Run(dirs []string, toolNames []string) (*Result, error) {
+// If autoInstall is true, missing tools are downloaded automatically.
+func Run(dirs []string, toolNames []string, autoInstall bool) (*Result, error) {
+	// Add local tool dir to PATH so auto-installed tools are found
+	toolDir := AddToolDirToPath()
+	os.Setenv("PATH", toolDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	if autoInstall {
+		installed, err := EnsureTools(toolNames)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  Warning: auto-install failed: %v\n", err)
+		}
+		if len(installed) > 0 {
+			fmt.Fprintf(os.Stderr, "  Auto-installed: %s\n\n", strings.Join(installed, ", "))
+		}
+	}
+
 	allTools := AvailableTools()
 	result := &Result{}
 
@@ -76,8 +93,12 @@ func Run(dirs []string, toolNames []string) (*Result, error) {
 	return result, nil
 }
 
-// DetectTools returns which tools are available on the system.
+// DetectTools returns which tools are available on the system (including local tool dir).
 func DetectTools() map[string]bool {
+	// Ensure local tool dir is in PATH for detection
+	toolDir := AddToolDirToPath()
+	os.Setenv("PATH", toolDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
 	available := map[string]bool{}
 	for _, tool := range AvailableTools() {
 		available[tool.Name] = tool.Check()
@@ -86,8 +107,16 @@ func DetectTools() map[string]bool {
 }
 
 func binaryExists(name string) bool {
-	_, err := exec.LookPath(name)
-	return err == nil
+	// Check PATH (includes local tool dir)
+	if _, err := exec.LookPath(name); err == nil {
+		return true
+	}
+	// Also check local tool dir directly
+	localPath := filepath.Join(InstallDir(), name)
+	if _, err := os.Stat(localPath); err == nil {
+		return true
+	}
+	return false
 }
 
 func contains(list []string, item string) bool {

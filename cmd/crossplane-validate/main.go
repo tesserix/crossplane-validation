@@ -308,8 +308,10 @@ func validateCmd() *cobra.Command {
 
 func lintCmd() *cobra.Command {
 	var (
-		tools     []string
-		outputFmt string
+		tools       []string
+		outputFmt   string
+		autoInstall bool
+		noInstall   bool
 	)
 
 	cmd := &cobra.Command{
@@ -317,14 +319,16 @@ func lintCmd() *cobra.Command {
 		Short: "Run external linting and validation tools on manifests",
 		Long: `Wraps popular open-source tools for comprehensive YAML and Kubernetes validation.
 
-Automatically detects and runs available tools:
+By default, missing tools are downloaded automatically to ~/.crossplane-validate/tools/.
+Use --no-install to skip auto-installation.
+
+Supported tools:
   yamllint             YAML syntax and style validation
   kubeconform          Kubernetes manifest schema validation
   pluto                Deprecated API version detection
   kube-linter          Kubernetes best practices and security analysis
   crossplane-validate  Crossplane composition and XRD validation (crossplane CLI)
 
-Install tools individually: brew install yamllint kubeconform pluto kube-linter
 Use --tools to run specific tools: --tools=yamllint,kubeconform`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			dirs := []string{"."}
@@ -332,27 +336,38 @@ Use --tools to run specific tools: --tools=yamllint,kubeconform`,
 				dirs = args
 			}
 
-			// Show available tools
+			autoInstall = !noInstall
+
+			// Show available tools before install
 			available := lint.DetectTools()
 			fmt.Fprintln(os.Stderr, "Tool detection:")
+			missing := 0
 			for _, t := range lint.AvailableTools() {
-				status := "not found"
-				if available[t.Name] {
-					status = "available"
+				status := "available"
+				if !available[t.Name] {
+					status = "not found"
+					missing++
 				}
 				fmt.Fprintf(os.Stderr, "  %-22s %s (%s)\n", t.Name, t.Purpose, status)
 			}
 			fmt.Fprintln(os.Stderr)
 
-			result, err := lint.Run(dirs, tools)
+			if missing > 0 && autoInstall {
+				fmt.Fprintf(os.Stderr, "Auto-installing %d missing tool(s)...\n", missing)
+			}
+
+			result, err := lint.Run(dirs, tools, autoInstall)
 			if err != nil {
 				return fmt.Errorf("running lint: %w", err)
 			}
 
 			if len(result.Tools) == 0 {
-				fmt.Fprintln(os.Stdout, "No external tools available. Install with:")
-				fmt.Fprintln(os.Stdout, "  brew install yamllint kubeconform kube-linter")
-				fmt.Fprintln(os.Stdout, "  brew install FairwindsOps/tap/pluto")
+				fmt.Fprintln(os.Stdout, "No external tools available.")
+				if noInstall {
+					fmt.Fprintln(os.Stdout, "Run without --no-install to auto-download tools, or install manually:")
+					fmt.Fprintln(os.Stdout, "  brew install yamllint kubeconform kube-linter")
+					fmt.Fprintln(os.Stdout, "  brew install FairwindsOps/tap/pluto")
+				}
 				return nil
 			}
 
@@ -366,6 +381,7 @@ Use --tools to run specific tools: --tools=yamllint,kubeconform`,
 
 	cmd.Flags().StringSliceVar(&tools, "tools", nil, "Specific tools to run (comma-separated)")
 	cmd.Flags().StringVarP(&outputFmt, "output", "o", "terminal", "Output format: terminal, json")
+	cmd.Flags().BoolVar(&noInstall, "no-install", false, "Skip auto-installation of missing tools")
 	return cmd
 }
 
