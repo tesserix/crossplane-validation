@@ -62,7 +62,7 @@ With --cloud, converts to HCL and runs OpenTofu plan with read-only credentials 
 				cfg.ManifestDirs = []string{manifestDir}
 			}
 
-			fmt.Println("Scanning manifests...")
+			fmt.Fprintln(os.Stderr, "Scanning manifests...")
 			baseManifests, err := manifest.ScanFromGitRef(cfg.ManifestDirs, baseBranch)
 			if err != nil {
 				return fmt.Errorf("scanning base branch %s: %w", baseBranch, err)
@@ -73,7 +73,7 @@ With --cloud, converts to HCL and runs OpenTofu plan with read-only credentials 
 				return fmt.Errorf("scanning target ref %s: %w", targetRef, err)
 			}
 
-			fmt.Println("Rendering compositions...")
+			fmt.Fprintln(os.Stderr, "Rendering compositions...")
 			baseRendered, err := renderer.Render(baseManifests)
 			if err != nil {
 				return fmt.Errorf("rendering base: %w", err)
@@ -84,14 +84,14 @@ With --cloud, converts to HCL and runs OpenTofu plan with read-only credentials 
 				return fmt.Errorf("rendering target: %w", err)
 			}
 
-			fmt.Println("Computing structural diff...")
+			fmt.Fprintln(os.Stderr, "Computing structural diff...")
 			structDiff := diff.Compute(baseRendered, targetRendered)
 
 			var cloudPlan *tofu.PlanResult
 			if cloudMode && cfg.HasCloudCredentials() {
-				fmt.Println("Loading provider schemas...")
+				fmt.Fprintln(os.Stderr, "Loading provider schemas...")
 				hcl.UseSchemaLookup = true
-				fmt.Println("Converting to HCL...")
+				fmt.Fprintln(os.Stderr, "Converting to HCL...")
 				baseHCL, err := hcl.Convert(baseRendered, cfg.Providers)
 				if err != nil {
 					return fmt.Errorf("converting base to HCL: %w", err)
@@ -101,7 +101,7 @@ With --cloud, converts to HCL and runs OpenTofu plan with read-only credentials 
 					return fmt.Errorf("converting target to HCL: %w", err)
 				}
 
-				fmt.Println("Running cloud plan (read-only)...")
+				fmt.Fprintln(os.Stderr, "Running cloud plan (read-only)...")
 				cloudPlan, err = tofu.Plan(baseHCL, targetHCL, cfg.Providers)
 				if err != nil {
 					return fmt.Errorf("running cloud plan: %w", err)

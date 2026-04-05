@@ -1,6 +1,7 @@
 package plan
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
@@ -128,9 +129,80 @@ func renderMarkdown(r *Result, w io.Writer) error {
 }
 
 func renderJSON(r *Result, w io.Writer) error {
-	// Minimal JSON output for programmatic consumption
-	fmt.Fprintln(w, "{}")
-	return nil
+	out := jsonOutput{
+		Changes: []jsonChange{},
+		Summary: jsonSummary{},
+	}
+
+	if r.StructuralDiff != nil {
+		out.Summary.Add = r.StructuralDiff.Summary.ToAdd
+		out.Summary.Change = r.StructuralDiff.Summary.ToChange
+		out.Summary.Destroy = r.StructuralDiff.Summary.ToDelete
+
+		for _, rd := range r.StructuralDiff.Diffs {
+			jc := jsonChange{
+				Action: string(rd.Action),
+				Kind:   rd.Kind,
+				Name:   rd.Name,
+				Fields: []jsonFieldChange{},
+			}
+			for _, fc := range rd.FieldChanges {
+				jc.Fields = append(jc.Fields, jsonFieldChange{
+					Path:     fc.Path,
+					Action:   string(fc.Action),
+					OldValue: fc.OldValue,
+					NewValue: fc.NewValue,
+				})
+			}
+			out.Changes = append(out.Changes, jc)
+		}
+	}
+
+	if r.CloudPlan != nil {
+		out.Cloud = &jsonCloudPlan{
+			HasChanges: r.CloudPlan.HasChanges,
+			Summary: jsonSummary{
+				Add:     r.CloudPlan.Summary.Add,
+				Change:  r.CloudPlan.Summary.Change,
+				Destroy: r.CloudPlan.Summary.Destroy,
+			},
+		}
+	}
+
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	return enc.Encode(out)
+}
+
+type jsonOutput struct {
+	Changes []jsonChange   `json:"changes"`
+	Summary jsonSummary    `json:"summary"`
+	Cloud   *jsonCloudPlan `json:"cloud,omitempty"`
+}
+
+type jsonChange struct {
+	Action string            `json:"action"`
+	Kind   string            `json:"kind"`
+	Name   string            `json:"name"`
+	Fields []jsonFieldChange `json:"fields"`
+}
+
+type jsonFieldChange struct {
+	Path     string      `json:"path"`
+	Action   string      `json:"action"`
+	OldValue interface{} `json:"oldValue,omitempty"`
+	NewValue interface{} `json:"newValue,omitempty"`
+}
+
+type jsonSummary struct {
+	Add     int `json:"add"`
+	Change  int `json:"change"`
+	Destroy int `json:"destroy"`
+}
+
+type jsonCloudPlan struct {
+	HasChanges bool        `json:"hasChanges"`
+	Summary    jsonSummary `json:"summary"`
 }
 
 func renderFieldChange(w io.Writer, fc diff.FieldChange, indent string) {
