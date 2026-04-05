@@ -15,6 +15,7 @@ import (
 
 type liveOptions struct {
 	operatorAddr  string
+	apiToken      string
 	kubeContext   string
 	namespace     string
 	manifestDirs  []string
@@ -36,9 +37,17 @@ func runLivePlan(opts liveOptions) error {
 
 	fmt.Fprintf(os.Stderr, "Connecting to operator at %s...\n", address)
 
+	useTLS := strings.HasSuffix(address, ":443") || strings.HasPrefix(address, "https://")
+	cleanAddr := strings.TrimPrefix(strings.TrimPrefix(address, "https://"), "http://")
+	token := opts.apiToken
+	if token == "" {
+		token = os.Getenv("CROSSPLANE_VALIDATE_API_TOKEN")
+	}
 	client, err := grpcclient.Connect(ctx, grpcclient.ConnectOptions{
-		Address: address,
-		Timeout: 15 * time.Second,
+		Address:  cleanAddr,
+		Timeout:  15 * time.Second,
+		TLS:      useTLS,
+		APIToken: token,
 	})
 	if err != nil {
 		return fmt.Errorf("connecting to operator: %w", err)
@@ -80,9 +89,17 @@ func runLiveDrift(opts liveOptions) error {
 		defer cleanup()
 	}
 
+	useTLS := strings.HasSuffix(address, ":443") || strings.HasPrefix(address, "https://")
+	cleanAddr := strings.TrimPrefix(strings.TrimPrefix(address, "https://"), "http://")
+	token := opts.apiToken
+	if token == "" {
+		token = os.Getenv("CROSSPLANE_VALIDATE_API_TOKEN")
+	}
 	client, err := grpcclient.Connect(ctx, grpcclient.ConnectOptions{
-		Address: address,
-		Timeout: 15 * time.Second,
+		Address:  cleanAddr,
+		Timeout:  15 * time.Second,
+		TLS:      useTLS,
+		APIToken: token,
 	})
 	if err != nil {
 		return err
@@ -116,9 +133,17 @@ func runLiveStatus(opts liveOptions) error {
 		defer cleanup()
 	}
 
+	useTLS := strings.HasSuffix(address, ":443") || strings.HasPrefix(address, "https://")
+	cleanAddr := strings.TrimPrefix(strings.TrimPrefix(address, "https://"), "http://")
+	token := opts.apiToken
+	if token == "" {
+		token = os.Getenv("CROSSPLANE_VALIDATE_API_TOKEN")
+	}
 	client, err := grpcclient.Connect(ctx, grpcclient.ConnectOptions{
-		Address: address,
-		Timeout: 15 * time.Second,
+		Address:  cleanAddr,
+		Timeout:  15 * time.Second,
+		TLS:      useTLS,
+		APIToken: token,
 	})
 	if err != nil {
 		return err

@@ -1,7 +1,7 @@
 crossplane-validate-operator has been deployed.
 
 Operator is running in namespace: {{ .Release.Namespace }}
-gRPC port: {{ .Values.service.grpcPort }}
+HTTP port: {{ .Values.service.httpPort }}
 Health port: {{ .Values.service.healthPort }}
 
 To verify the operator is running:
@@ -14,8 +14,8 @@ To use the CLI with the operator:
 
 Or connect directly:
 
-  kubectl port-forward -n {{ .Release.Namespace }} svc/{{ include "operator.fullname" . }} {{ .Values.service.grpcPort }}:{{ .Values.service.grpcPort }} &
-  crossplane-validate plan --live --operator-address=localhost:{{ .Values.service.grpcPort }} --manifests=./crossplane/
+  kubectl port-forward -n {{ .Release.Namespace }} svc/{{ include "operator.fullname" . }} {{ .Values.service.httpPort }}:{{ .Values.service.httpPort }} &
+  crossplane-validate plan --live --operator-address=localhost:{{ .Values.service.httpPort }} --manifests=./crossplane/
 
 To check drift:
 

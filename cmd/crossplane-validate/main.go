@@ -55,6 +55,7 @@ func planCmd() *cobra.Command {
 		showSensitive    bool
 		liveMode         bool
 		operatorAddr     string
+		apiToken         string
 		kubeContext      string
 		namespace        string
 	)
@@ -88,6 +89,7 @@ With --live, connects to the in-cluster operator and compares proposed manifests
 				}
 				return runLivePlan(liveOptions{
 					operatorAddr:  addr,
+					apiToken:      apiToken,
 					kubeContext:   kubeContext,
 					namespace:     ns,
 					manifestDirs:  cfg.ManifestDirs,
@@ -186,7 +188,8 @@ With --live, connects to the in-cluster operator and compares proposed manifests
 	cmd.Flags().BoolVar(&detailedExitcode, "detailed-exitcode", false, "Return exit code 2 when changes are detected (0=no changes, 1=error, 2=changes)")
 	cmd.Flags().BoolVar(&showSensitive, "show-sensitive", false, "Show sensitive field values in plain text (passwords, tokens, keys)")
 	cmd.Flags().BoolVar(&liveMode, "live", false, "Connect to in-cluster operator for live state comparison")
-	cmd.Flags().StringVar(&operatorAddr, "operator-address", "", "Operator gRPC address (default: auto port-forward)")
+	cmd.Flags().StringVar(&operatorAddr, "operator-address", "", "Operator address (e.g. localhost:9443 or crossplane-validator.hub.civica.tech:443)")
+	cmd.Flags().StringVar(&apiToken, "api-token", "", "API bearer token for operator authentication (or set CROSSPLANE_VALIDATE_API_TOKEN)")
 	cmd.Flags().StringVar(&kubeContext, "context", "", "Kubernetes context to use")
 	cmd.Flags().StringVar(&namespace, "namespace", "", "Operator namespace (default: crossplane-system)")
 
@@ -196,6 +199,7 @@ With --live, connects to the in-cluster operator and compares proposed manifests
 func statusCmd() *cobra.Command {
 	var (
 		operatorAddr string
+		apiToken     string
 		kubeContext  string
 		namespace    string
 		configFile   string
@@ -221,13 +225,15 @@ func statusCmd() *cobra.Command {
 
 			return runLiveStatus(liveOptions{
 				operatorAddr: addr,
+				apiToken:     apiToken,
 				kubeContext:  kubeContext,
 				namespace:    ns,
 			})
 		},
 	}
 
-	cmd.Flags().StringVar(&operatorAddr, "operator-address", "", "Operator gRPC address")
+	cmd.Flags().StringVar(&operatorAddr, "operator-address", "", "Operator address")
+	cmd.Flags().StringVar(&apiToken, "api-token", "", "API bearer token (or set CROSSPLANE_VALIDATE_API_TOKEN)")
 	cmd.Flags().StringVar(&kubeContext, "context", "", "Kubernetes context to use")
 	cmd.Flags().StringVar(&namespace, "namespace", "", "Operator namespace")
 	cmd.Flags().StringVarP(&configFile, "config", "c", ".crossplane-validate.yml", "Config file path")
@@ -237,6 +243,7 @@ func statusCmd() *cobra.Command {
 func driftCmd() *cobra.Command {
 	var (
 		operatorAddr string
+		apiToken     string
 		kubeContext  string
 		namespace    string
 		configFile   string
@@ -267,6 +274,7 @@ func driftCmd() *cobra.Command {
 
 			return runLiveDrift(liveOptions{
 				operatorAddr: addr,
+				apiToken:     apiToken,
 				kubeContext:  kubeContext,
 				namespace:    ns,
 				manifestDirs: cfg.ManifestDirs,
@@ -274,7 +282,8 @@ func driftCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVar(&operatorAddr, "operator-address", "", "Operator gRPC address")
+	cmd.Flags().StringVar(&operatorAddr, "operator-address", "", "Operator address")
+	cmd.Flags().StringVar(&apiToken, "api-token", "", "API bearer token (or set CROSSPLANE_VALIDATE_API_TOKEN)")
 	cmd.Flags().StringVar(&kubeContext, "context", "", "Kubernetes context to use")
 	cmd.Flags().StringVar(&namespace, "namespace", "", "Operator namespace")
 	cmd.Flags().StringVarP(&configFile, "config", "c", ".crossplane-validate.yml", "Config file path")

@@ -16,6 +16,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
 	"github.com/tesserix/crossplane-validation/pkg/diff"
+	"github.com/tesserix/crossplane-validation/pkg/manifest"
 	"github.com/tesserix/crossplane-validation/pkg/notify"
 	"github.com/tesserix/crossplane-validation/pkg/operator"
 )
@@ -178,6 +179,56 @@ func (v *ValidationServiceImpl) ComputePlan(ctx context.Context, proposedYAML []
 			Message:     warn.Message,
 			Severity:    warn.Severity,
 		})
+	}
+
+	// Resolve composition changes for each changed resource
+	if result.StructuralDiff != nil {
+		proposed, _ := manifest.ParseBytes(proposedYAML)
+		if proposed != nil {
+			for _, res := range proposed.AllResources() {
+				changedFields := make(map[string]operator.ComposedFieldChange)
+				if resp.Plan != nil {
+					for _, rc := range resp.Plan.Changes {
+						if rc.Kind == res.GetKind() && rc.Name == res.GetName() && rc.Action == "update" {
+							for _, fc := range rc.FieldChanges {
+								if fc.Action == "update" {
+									changedFields[fc.Path] = operator.ComposedFieldChange{
+										Path:     fc.Path,
+										OldValue: fc.OldValue,
+										NewValue: fc.NewValue,
+									}
+								}
+							}
+						}
+					}
+				}
+				if len(changedFields) > 0 {
+					r := res
+					composedChanges, tree := operator.ResolveComposedChanges(v.cache, &r, changedFields)
+					for _, cc := range composedChanges {
+						var fields []*ComposedField
+						for _, f := range cc.FieldChanges {
+							fields = append(fields, &ComposedField{
+								Path:     f.Path,
+								OldValue: f.OldValue,
+								NewValue: f.NewValue,
+							})
+						}
+						resp.ComposedChanges = append(resp.ComposedChanges, &ComposedResourceChange{
+							ResourceKind:    cc.ResourceKind,
+							ResourceName:    cc.ResourceName,
+							APIVersion:      cc.APIVersion,
+							CompositionStep: cc.CompositionStep,
+							Depth:           cc.Depth,
+							FieldChanges:    fields,
+						})
+					}
+					if tree != nil && len(tree.Children) > 0 {
+						resp.ResourceTree = append(resp.ResourceTree, convertTree(tree))
+					}
+				}
+			}
+		}
 	}
 
 	if v.notifier != nil && result.StructuralDiff != nil {
@@ -395,9 +446,37 @@ type Condition struct {
 // ComputePlanResponse contains the plan result, validation issues, and drift warnings.
 type ComputePlanResponse struct {
 	Plan             *PlanResult
+	ComposedChanges  []*ComposedResourceChange `json:",omitempty"`
+	ResourceTree     []*ResourceTreeNode       `json:",omitempty"`
 	ValidationIssues []*ValidationIssue
 	DriftWarnings    []*DriftWarning
 	ClusterInfo      *ClusterInfo
+}
+
+// ComposedResourceChange represents a predicted change to a composed/managed resource.
+type ComposedResourceChange struct {
+	ResourceKind    string             `json:"ResourceKind"`
+	ResourceName    string             `json:"ResourceName"`
+	APIVersion      string             `json:"APIVersion"`
+	CompositionStep string             `json:"CompositionStep"`
+	Depth           int                `json:"Depth"`
+	FieldChanges    []*ComposedField   `json:"FieldChanges"`
+}
+
+// ComposedField is a predicted field change on a composed resource.
+type ComposedField struct {
+	Path     string `json:"Path"`
+	OldValue string `json:"OldValue"`
+	NewValue string `json:"NewValue"`
+}
+
+// ResourceTreeNode represents a node in the Crossplane resource hierarchy.
+type ResourceTreeNode struct {
+	Kind       string              `json:"Kind"`
+	Name       string              `json:"Name"`
+	Namespace  string              `json:"Namespace,omitempty"`
+	APIVersion string              `json:"APIVersion"`
+	Children   []*ResourceTreeNode `json:"Children,omitempty"`
 }
 
 // ClusterInfo contains metadata about the operator's cluster connection.
@@ -484,4 +563,21 @@ type DriftSummaryProto struct {
 type GetResourceStatusResponse struct {
 	Resource *Resource
 	Children []*Resource
+}
+
+// convertTree converts an operator ResourceTreeNode to the server's type.
+func convertTree(node *operator.ResourceTreeNode) *ResourceTreeNode {
+	if node == nil {
+		return nil
+	}
+	n := &ResourceTreeNode{
+		Kind:       node.Kind,
+		Name:       node.Name,
+		Namespace:  node.Namespace,
+		APIVersion: node.APIVersion,
+	}
+	for _, child := range node.Children {
+		n.Children = append(n.Children, convertTree(child))
+	}
+	return n
 }

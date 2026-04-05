@@ -12,7 +12,7 @@ imagePullSecrets: []
 
 service:
   type: ClusterIP
-  grpcPort: 9443
+  httpPort: 9443
   healthPort: 8081
 
 serviceAccount:
