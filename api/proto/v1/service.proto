@@ -1,0 +1,169 @@
+syntax = "proto3";
+
+package crossplane_validate.v1;
+
+option go_package = "github.com/tesserix/crossplane-validation/api/proto/v1;v1";
+
+service ValidationService {
+  rpc Health(HealthRequest) returns (HealthResponse);
+  rpc GetClusterState(GetClusterStateRequest) returns (GetClusterStateResponse);
+  rpc ComputePlan(ComputePlanRequest) returns (ComputePlanResponse);
+  rpc GetDrift(GetDriftRequest) returns (GetDriftResponse);
+  rpc GetResourceStatus(GetResourceStatusRequest) returns (GetResourceStatusResponse);
+  rpc StreamEvents(StreamEventsRequest) returns (stream ResourceEvent);
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  bool healthy = 1;
+  int32 cached_resources = 2;
+  string uptime = 3;
+  repeated string watched_groups = 4;
+}
+
+message GetClusterStateRequest {
+  string namespace = 1;
+  string kind = 2;
+  string api_group = 3;
+}
+
+message GetClusterStateResponse {
+  repeated Resource resources = 1;
+  int32 total = 2;
+}
+
+message Resource {
+  string api_version = 1;
+  string kind = 2;
+  string name = 3;
+  string namespace = 4;
+  bytes raw_json = 5;
+  ResourceStatus status = 6;
+  string external_name = 7;
+}
+
+message ResourceStatus {
+  bool ready = 1;
+  bool synced = 2;
+  repeated Condition conditions = 3;
+}
+
+message Condition {
+  string type = 1;
+  string status = 2;
+  string reason = 3;
+  string message = 4;
+  string last_transition_time = 5;
+}
+
+message ComputePlanRequest {
+  bytes proposed_manifests = 1;
+  string output_format = 2;
+  bool show_sensitive = 3;
+  bool cloud_mode = 4;
+}
+
+message ComputePlanResponse {
+  PlanResult plan = 1;
+  repeated ValidationIssue validation_issues = 2;
+  repeated DriftWarning drift_warnings = 3;
+  ClusterInfo cluster_info = 4;
+}
+
+message ClusterInfo {
+  int32 cached_resources = 1;
+  string cache_age = 2;
+  string cluster_name = 3;
+}
+
+message PlanResult {
+  repeated ResourceChange changes = 1;
+  PlanSummary summary = 2;
+}
+
+message ResourceChange {
+  string action = 1;
+  string kind = 2;
+  string name = 3;
+  string namespace = 4;
+  string api_version = 5;
+  repeated FieldChange field_changes = 6;
+  bool destructive = 7;
+  string source = 8;
+}
+
+message FieldChange {
+  string path = 1;
+  string action = 2;
+  string old_value = 3;
+  string new_value = 4;
+}
+
+message PlanSummary {
+  int32 to_add = 1;
+  int32 to_change = 2;
+  int32 to_delete = 3;
+  int32 no_op = 4;
+}
+
+message ValidationIssue {
+  string severity = 1;
+  string resource = 2;
+  string field = 3;
+  string message = 4;
+}
+
+message DriftWarning {
+  string resource_key = 1;
+  string message = 2;
+  string severity = 3;
+}
+
+message GetDriftRequest {
+  bytes git_manifests = 1;
+}
+
+message GetDriftResponse {
+  repeated DriftEntry drifts = 1;
+  DriftSummary summary = 2;
+}
+
+message DriftEntry {
+  string resource_key = 1;
+  string kind = 2;
+  string name = 3;
+  string namespace = 4;
+  string drift_type = 5;
+  repeated FieldChange field_changes = 6;
+}
+
+message DriftSummary {
+  int32 missing_in_cluster = 1;
+  int32 missing_in_git = 2;
+  int32 spec_drift = 3;
+  int32 total = 4;
+}
+
+message GetResourceStatusRequest {
+  string api_version = 1;
+  string kind = 2;
+  string name = 3;
+  string namespace = 4;
+}
+
+message GetResourceStatusResponse {
+  Resource resource = 1;
+  repeated Resource children = 2;
+}
+
+message StreamEventsRequest {
+  string namespace = 1;
+  string kind = 2;
+}
+
+message ResourceEvent {
+  string event_type = 1;
+  Resource resource = 2;
+  string timestamp = 3;
+}

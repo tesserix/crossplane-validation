@@ -13,11 +13,25 @@ A living document tracking planned features and improvements.
 - [x] Dynamic resource type resolution from provider schema
 - [x] Auto-import existing cloud resources for update diffs
 - [x] Auto-detect providers from manifests
+- [x] Auto-detect credentials from environment (env vars, CLI profiles, OIDC, managed identity)
 - [x] `scan` command for resource discovery
+- [x] `validate` command — schema validation against XRD CRDs
+- [x] JSON output (`--output=json`) for programmatic consumption
+- [x] Destructive change warnings — flags operations that cause downtime or data loss
 - [x] Homebrew distribution
 - [x] GitHub Action
 - [x] Multi-platform binaries (macOS, Linux, Windows)
 - [x] PR comment output (markdown format)
+- [x] **In-cluster operator** — watches Crossplane resources, caches live state via dynamic informers
+- [x] **Live plan mode** (`--live`) — compare proposed manifests against actual cluster state
+- [x] **Drift detection** — compare git manifests vs live cluster state (`drift` command)
+- [x] **Cluster status** — view resource health and readiness (`status` command)
+- [x] **gRPC API** — operator exposes gRPC service for CLI and CI connectivity
+- [x] **Slack/Teams notifications** — post plan summaries to chat channels
+- [x] **Docker image** — `ghcr.io/tesserix/crossplane-validate-operator` (public)
+- [x] **Helm chart** — deploy operator with `helm install`
+- [x] **Kustomize manifests** — alternative operator deployment
+- [x] **Live CI workflow** — GitHub Actions workflow for live plan PR comments
 
 ---
 
@@ -40,31 +54,32 @@ A living document tracking planned features and improvements.
 
 - [ ] **Policy engine** — OPA/Rego policy checks on manifests (naming, tags, regions, cost controls)
 - [ ] **Cost estimation** — estimate cloud costs for planned changes (like Infracost)
-- [ ] **Drift detection** — compare git state vs live cluster state vs cloud state
 - [ ] **Composition function support** — full offline rendering for `function-go-templating` and custom functions
 - [ ] **Dependency graph** — visualize resource relationships and creation order
-- [ ] **Destructive change warnings** — flag operations that cause downtime or data loss (e.g., DB engine change, storage account deletion)
+- [ ] **Validating admission webhook** — block dangerous changes before Crossplane reconciles them
 
 ### CLI Improvements
 
 - [ ] **Interactive mode** — step through changes one by one with approve/skip
-- [ ] **Config auto-detection** — detect provider credentials from environment without explicit config
 - [ ] **Parallel provider schema loading** — speed up `--cloud` mode for multi-provider setups
-- [ ] **JSON output** — structured output for programmatic consumption
 - [ ] **`plan --watch`** — continuous plan on file changes during development
-- [ ] **`validate` command** — schema validation without diff (check YAML is valid against CRDs)
+
+### Operator Enhancements
+
+- [ ] **ValidationPolicy CRD** — define rules (max instance size, required tags, blocked regions)
+- [ ] **ValidationResult CRD** — persist plan outputs for audit trail
+- [ ] **ArgoCD pre-sync hook** — run validation before ArgoCD syncs resources
+- [ ] **mTLS** — certificate-based auth between CLI and operator
+- [ ] **Multi-cluster** — CLI queries multiple operators, aggregated view
 
 ### CI/CD Integration
 
 - [ ] **GitLab CI template** — reusable pipeline for GitLab
 - [ ] **Azure DevOps task** — native ADO pipeline task
 - [ ] **Bitbucket Pipes** — Bitbucket pipeline integration
-- [ ] **ArgoCD integration** — pre-sync hook that runs validation before ArgoCD applies
-- [ ] **Slack/Teams notifications** — post plan summaries to chat
 
 ### Distribution
 
-- [ ] **Docker image** — `ghcr.io/tesserix/crossplane-validate`
 - [ ] **Nix package** — for NixOS users
 - [ ] **Chocolatey package** — for Windows users
 - [ ] **Krew plugin** — install as `kubectl crossplane-validate`

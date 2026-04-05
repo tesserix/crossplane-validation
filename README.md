@@ -9,6 +9,18 @@
 
 **`terraform plan` for Crossplane.** Preview what your manifests will create, change, or destroy — before merging.
 
+<p align="center">
+  <code>crossplane</code> &middot; <code>kubernetes</code> &middot; <code>infrastructure-as-code</code> &middot; <code>gitops</code> &middot; <code>cloud-native</code> &middot; <code>terraform</code> &middot; <code>opentofu</code> &middot; <code>aws</code> &middot; <code>gcp</code> &middot; <code>azure</code> &middot; <code>devops</code> &middot; <code>ci-cd</code> &middot; <code>platform-engineering</code> &middot; <code>shift-left</code> &middot; <code>cli</code>
+</p>
+
+## About
+
+`crossplane-validate` is an open-source CLI that brings `terraform plan`-style previews to [Crossplane](https://www.crossplane.io/). It shows you exactly what a PR will add, change, or destroy in your cloud infrastructure — before it gets merged.
+
+It works by rendering Crossplane compositions, diffing the output between git branches, and optionally running a real Terraform/OpenTofu plan against your cloud. Sensitive fields are automatically masked, destructive changes are flagged, and the output can be posted as a PR comment for team review.
+
+No cluster access required. Runs locally, in GitHub Actions, or any CI system.
+
 ```
 $ crossplane-validate plan --manifests=./crossplane/
 
@@ -37,7 +49,7 @@ $ crossplane-validate plan --manifests=./crossplane/
 Plan: 1 to add, 2 to change, 1 to destroy
 ```
 
-Runs locally, in CI, or both. No cluster required.
+Runs locally, in CI, or both. With the **in-cluster operator**, get live state comparison, drift detection, and real-time plans before merging.
 
 ---
 
@@ -46,7 +58,8 @@ Runs locally, in CI, or both. No cluster required.
 
 - [Why](#why)
 - [Install](#install)
-- [Commands](#commands) — `plan` | `validate` | `lint` | `scan` | `render` | `diff`
+- [Commands](#commands) — `plan` | `validate` | `lint` | `scan` | `render` | `diff` | `status` | `drift`
+- [Operator (Live Mode)](#operator-live-mode) — in-cluster state, real-time plans, drift detection
 - [Guardrails](#guardrails) — sensitive masking, destructive warnings, CI gating
 - [Cloud-Aware Plan](#cloud-aware-plan)
 - [Multi-Cloud](#multi-cloud) — provider & credential auto-detection
@@ -226,6 +239,152 @@ Renders compositions into the managed resources Crossplane would create. Uses `c
 
 ```bash
 crossplane-validate diff ./crossplane/
+```
+
+### `status` — live cluster resource health (requires operator)
+
+```bash
+crossplane-validate status
+crossplane-validate status --context=prod-cluster
+```
+
+Connects to the in-cluster operator and shows Crossplane resource counts, readiness, and conditions.
+
+### `drift` — git vs cluster differences (requires operator)
+
+```bash
+crossplane-validate drift --manifests=./crossplane/
+crossplane-validate drift --manifests=./crossplane/ --context=prod-cluster
+```
+
+Compares your git manifests against what's actually running in the cluster. Shows resources missing in cluster, extra resources not in git, and spec field drift.
+
+---
+
+## Operator (Live Mode)
+
+The operator runs inside your Kubernetes cluster alongside Crossplane. It watches all Crossplane resources, caches their live state, and exposes a gRPC API that the CLI connects to.
+
+This enables **live plans** — instead of just comparing git branches, you see what will change relative to what's *actually deployed*.
+
+```
+$ crossplane-validate plan --live --manifests=./crossplane/
+
+Connected to operator | Resources cached: 47 | Cache age: 12s
+
+⚠ DRIFT DETECTED
+  ~ Instance/app-db: field allocatedStorage differs (cluster: 150, proposed: 200)
+
+═══ Proposed Changes ═══
+
+  ~ Instance/app-db (Ready)
+      ~ spec.forProvider.instanceClass: db.r6g.large → db.r6g.xlarge
+      ~ spec.forProvider.allocatedStorage: 150 (live) → 200
+
+  + GlobalAddress/api-gateway-ip
+      + spec.forProvider.addressType: EXTERNAL
+
+Plan: 1 to add, 1 to change, 0 to destroy
+Drift: 1 resource drifted from git
+```
+
+### Install the Operator
+
+**Helm**
+
+```bash
+helm install crossplane-validate-operator \
+  oci://ghcr.io/tesserix/charts/crossplane-validate-operator \
+  --namespace crossplane-system
+```
+
+Or from source:
+
+```bash
+helm install crossplane-validate-operator \
+  deploy/helm/crossplane-validate-operator \
+  --namespace crossplane-system --create-namespace
+```
+
+**Kustomize**
+
+```bash
+kubectl apply -k deploy/kustomize/base
+```
+
+### Operator Architecture
+
+The operator is a single pod with:
+- **Dynamic informers** watching all Crossplane CRDs (auto-discovers installed providers)
+- **gRPC API** on port 9443 for CLI connectivity
+- **Health endpoint** on port 8081 for Kubernetes probes
+- **Read-only RBAC** — only `get`, `list`, `watch` on Crossplane resources
+
+The operator image is public at `ghcr.io/tesserix/crossplane-validate-operator`.
+
+### Live Plan Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--live` | `false` | Connect to in-cluster operator for live state comparison |
+| `--operator-address` | `""` | Direct gRPC address (default: auto port-forward) |
+| `--context` | `""` | Kubernetes context to use |
+| `--namespace` | `crossplane-system` | Operator namespace |
+
+### Notifications
+
+The operator can post plan summaries to Slack or Microsoft Teams:
+
+```bash
+helm install crossplane-validate-operator deploy/helm/crossplane-validate-operator \
+  --set notifications.slack.enabled=true \
+  --set notifications.slack.webhookUrl=https://hooks.slack.com/services/xxx
+```
+
+### Live Plan in GitHub Actions
+
+```yaml
+steps:
+  - uses: actions/checkout@v4
+    with:
+      fetch-depth: 0
+
+  # Auth to your cluster (OIDC recommended)
+  # ...
+
+  - name: Port-forward to operator
+    run: |
+      kubectl port-forward -n crossplane-system svc/crossplane-validate-operator 9443:9443 &
+      sleep 3
+
+  - name: Live plan
+    run: |
+      crossplane-validate plan \
+        --live --operator-address=localhost:9443 \
+        --manifests=./crossplane/ --output=markdown > plan.md
+
+  - name: Comment on PR
+    uses: actions/github-script@v7
+    with:
+      script: |
+        const fs = require('fs');
+        const body = fs.readFileSync('plan.md', 'utf8');
+        const { data: comments } = await github.rest.issues.listComments({
+          owner: context.repo.owner, repo: context.repo.repo,
+          issue_number: context.issue.number,
+        });
+        const existing = comments.find(c => c.body.includes('### Crossplane Validation'));
+        if (existing) {
+          await github.rest.issues.updateComment({
+            owner: context.repo.owner, repo: context.repo.repo,
+            comment_id: existing.id, body,
+          });
+        } else {
+          await github.rest.issues.createComment({
+            owner: context.repo.owner, repo: context.repo.repo,
+            issue_number: context.issue.number, body,
+          });
+        }
 ```
 
 ---
@@ -651,21 +810,33 @@ Read-only credentials are recommended. The CLI only reads cloud state — it nev
 
 ```
 crossplane-validation/
-├── cmd/crossplane-validate/     CLI entry point (plan, validate, lint, scan, render, diff)
+├── cmd/
+│   ├── crossplane-validate/          CLI (plan, validate, lint, scan, render, diff, status, drift)
+│   └── crossplane-validate-operator/ In-cluster operator binary
+├── api/proto/v1/                     gRPC service definition (protobuf)
 ├── pkg/
-│   ├── manifest/                YAML scanning, kustomize discovery, resource classification
-│   ├── validate/                XRD schema validation, ProviderConfig/Composition checks
-│   ├── renderer/                Composition rendering (built-in + crossplane render)
-│   ├── diff/                    Structural diff engine, sensitive masking, array diffs
-│   ├── hcl/                     Crossplane → HCL conversion, dynamic schema lookup
-│   ├── tofu/                    Terraform/OpenTofu plan execution
-│   ├── plan/                    Output rendering (terminal, markdown, JSON)
-│   ├── lint/                    External tool wrapper (yamllint, kubeconform, pluto, etc.)
-│   └── config/                  Configuration file loading
-├── testdata/                    Test manifests (AWS, GCP, Azure, kustomize, compositions)
-├── .github/workflows/           CI, Release, PR Validation
-├── action.yml                   GitHub Action definition
-└── ROADMAP.md                   Planned features
+│   ├── manifest/                     YAML scanning, kustomize discovery, resource classification
+│   ├── validate/                     XRD schema validation, ProviderConfig/Composition checks
+│   ├── renderer/                     Composition rendering (built-in + crossplane render)
+│   ├── diff/                         Structural diff engine, sensitive masking, array diffs
+│   ├── hcl/                          Crossplane → HCL conversion, dynamic schema lookup
+│   ├── tofu/                         Terraform/OpenTofu plan execution
+│   ├── plan/                         Output rendering (terminal, markdown, JSON)
+│   ├── lint/                         External tool wrapper (yamllint, kubeconform, pluto, etc.)
+│   ├── config/                       Configuration file loading
+│   ├── operator/                     State cache, live plan computation, drift detection
+│   ├── grpc/                         gRPC server and client
+│   ├── k8s/                          Dynamic CRD discovery, port-forward helper
+│   └── notify/                       Slack and Teams notification senders
+├── deploy/
+│   ├── helm/crossplane-validate-operator/  Helm chart for operator
+│   └── kustomize/                          Kustomize manifests for operator
+├── testdata/                         Test manifests (AWS, GCP, Azure, kustomize, compositions)
+├── Dockerfile                        Multi-stage build for operator image
+├── Makefile                          Build, test, docker, helm targets
+├── .github/workflows/                CI, Release, PR Validation, Live Validation
+├── action.yml                        GitHub Action definition
+└── ROADMAP.md                        Planned features
 ```
 
 ---

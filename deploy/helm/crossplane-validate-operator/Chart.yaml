@@ -1,0 +1,18 @@
+apiVersion: v2
+name: crossplane-validate-operator
+description: In-cluster operator for crossplane-validate — live state, drift detection, and real-time plans
+version: 0.1.0
+appVersion: "0.1.0"
+type: application
+keywords:
+  - crossplane
+  - validation
+  - kubernetes
+  - gitops
+  - infrastructure-as-code
+home: https://github.com/tesserix/crossplane-validation
+sources:
+  - https://github.com/tesserix/crossplane-validation
+maintainers:
+  - name: tesserix
+    url: https://github.com/tesserix

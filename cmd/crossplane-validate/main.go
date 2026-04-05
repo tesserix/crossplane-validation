@@ -35,6 +35,8 @@ func main() {
 	root.AddCommand(scanCmd())
 	root.AddCommand(validateCmd())
 	root.AddCommand(lintCmd())
+	root.AddCommand(statusCmd())
+	root.AddCommand(driftCmd())
 
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
@@ -51,6 +53,10 @@ func planCmd() *cobra.Command {
 		cloudMode        bool
 		detailedExitcode bool
 		showSensitive    bool
+		liveMode         bool
+		operatorAddr     string
+		kubeContext      string
+		namespace        string
 	)
 
 	cmd := &cobra.Command{
@@ -59,7 +65,8 @@ func planCmd() *cobra.Command {
 		Long: `Compares Crossplane manifests between branches and shows a terraform-style plan.
 
 By default, performs a git-based diff comparing rendered manifests between base and target branches.
-With --cloud, converts to HCL and runs OpenTofu plan with read-only credentials for cloud-aware validation.`,
+With --cloud, converts to HCL and runs OpenTofu plan with read-only credentials for cloud-aware validation.
+With --live, connects to the in-cluster operator and compares proposed manifests against live cluster state.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := config.Load(configFile)
 			if err != nil {
@@ -68,6 +75,25 @@ With --cloud, converts to HCL and runs OpenTofu plan with read-only credentials 
 
 			if manifestDir != "" {
 				cfg.ManifestDirs = []string{manifestDir}
+			}
+
+			if liveMode {
+				ns := namespace
+				if ns == "" {
+					ns = cfg.Operator.Namespace
+				}
+				addr := operatorAddr
+				if addr == "" {
+					addr = cfg.Operator.Address
+				}
+				return runLivePlan(liveOptions{
+					operatorAddr:  addr,
+					kubeContext:   kubeContext,
+					namespace:     ns,
+					manifestDirs:  cfg.ManifestDirs,
+					outputFmt:     outputFmt,
+					showSensitive: showSensitive,
+				})
 			}
 
 			fmt.Fprintln(os.Stderr, "Scanning manifests...")
@@ -159,7 +185,100 @@ With --cloud, converts to HCL and runs OpenTofu plan with read-only credentials 
 	cmd.Flags().BoolVar(&cloudMode, "cloud", false, "Enable cloud-aware plan using OpenTofu (requires credentials)")
 	cmd.Flags().BoolVar(&detailedExitcode, "detailed-exitcode", false, "Return exit code 2 when changes are detected (0=no changes, 1=error, 2=changes)")
 	cmd.Flags().BoolVar(&showSensitive, "show-sensitive", false, "Show sensitive field values in plain text (passwords, tokens, keys)")
+	cmd.Flags().BoolVar(&liveMode, "live", false, "Connect to in-cluster operator for live state comparison")
+	cmd.Flags().StringVar(&operatorAddr, "operator-address", "", "Operator gRPC address (default: auto port-forward)")
+	cmd.Flags().StringVar(&kubeContext, "context", "", "Kubernetes context to use")
+	cmd.Flags().StringVar(&namespace, "namespace", "", "Operator namespace (default: crossplane-system)")
 
+	return cmd
+}
+
+func statusCmd() *cobra.Command {
+	var (
+		operatorAddr string
+		kubeContext  string
+		namespace    string
+		configFile   string
+	)
+
+	cmd := &cobra.Command{
+		Use:   "status",
+		Short: "Show live Crossplane resource status from the cluster",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.Load(configFile)
+			if err != nil {
+				return err
+			}
+
+			ns := namespace
+			if ns == "" {
+				ns = cfg.Operator.Namespace
+			}
+			addr := operatorAddr
+			if addr == "" {
+				addr = cfg.Operator.Address
+			}
+
+			return runLiveStatus(liveOptions{
+				operatorAddr: addr,
+				kubeContext:  kubeContext,
+				namespace:    ns,
+			})
+		},
+	}
+
+	cmd.Flags().StringVar(&operatorAddr, "operator-address", "", "Operator gRPC address")
+	cmd.Flags().StringVar(&kubeContext, "context", "", "Kubernetes context to use")
+	cmd.Flags().StringVar(&namespace, "namespace", "", "Operator namespace")
+	cmd.Flags().StringVarP(&configFile, "config", "c", ".crossplane-validate.yml", "Config file path")
+	return cmd
+}
+
+func driftCmd() *cobra.Command {
+	var (
+		operatorAddr string
+		kubeContext  string
+		namespace    string
+		configFile   string
+		manifestDir  string
+	)
+
+	cmd := &cobra.Command{
+		Use:   "drift",
+		Short: "Show differences between git manifests and live cluster state",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.Load(configFile)
+			if err != nil {
+				return err
+			}
+
+			if manifestDir != "" {
+				cfg.ManifestDirs = []string{manifestDir}
+			}
+
+			ns := namespace
+			if ns == "" {
+				ns = cfg.Operator.Namespace
+			}
+			addr := operatorAddr
+			if addr == "" {
+				addr = cfg.Operator.Address
+			}
+
+			return runLiveDrift(liveOptions{
+				operatorAddr: addr,
+				kubeContext:  kubeContext,
+				namespace:    ns,
+				manifestDirs: cfg.ManifestDirs,
+			})
+		},
+	}
+
+	cmd.Flags().StringVar(&operatorAddr, "operator-address", "", "Operator gRPC address")
+	cmd.Flags().StringVar(&kubeContext, "context", "", "Kubernetes context to use")
+	cmd.Flags().StringVar(&namespace, "namespace", "", "Operator namespace")
+	cmd.Flags().StringVarP(&configFile, "config", "c", ".crossplane-validate.yml", "Config file path")
+	cmd.Flags().StringVarP(&manifestDir, "manifests", "m", "", "Manifest directory")
 	return cmd
 }
 

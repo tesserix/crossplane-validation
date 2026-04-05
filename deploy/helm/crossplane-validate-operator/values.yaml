@@ -1,0 +1,44 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/tesserix/crossplane-validate-operator
+  tag: ""
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  grpcPort: 9443
+  healthPort: 8081
+
+serviceAccount:
+  create: true
+  name: crossplane-validate-operator
+  annotations: {}
+
+rbac:
+  create: true
+  watchGroups: []
+
+resources:
+  limits:
+    memory: 256Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+operator:
+  logLevel: info
+  watchGroups: ""
+
+notifications:
+  slack:
+    enabled: false
+    webhookUrl: ""
+    channel: ""
+  teams:
+    enabled: false
+    webhookUrl: ""

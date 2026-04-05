@@ -1,4 +1,6 @@
 /crossplane-validate
+/crossplane-validate-operator
+bin/
 *.exe
 dist/
 .crossplane-validate.yml

@@ -1,0 +1,179 @@
+package main
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"log"
+	"net/http"
+	"os"
+	"os/signal"
+	"strings"
+	"syscall"
+	"time"
+
+	"k8s.io/client-go/discovery"
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
+
+	grpcpkg "github.com/tesserix/crossplane-validation/pkg/grpc"
+	"github.com/tesserix/crossplane-validation/pkg/notify"
+	"github.com/tesserix/crossplane-validation/pkg/operator"
+)
+
+var version = "dev"
+
+func main() {
+	var (
+		grpcPort    int
+		healthPort  int
+		watchGroups string
+		kubeconfig  string
+		logLevel    string
+		slackURL    string
+		teamsURL    string
+	)
+
+	flag.IntVar(&grpcPort, "grpc-port", 9443, "gRPC server port")
+	flag.IntVar(&healthPort, "health-port", 8081, "Health check HTTP port")
+	flag.StringVar(&watchGroups, "watch-groups", "", "Additional API groups to watch (comma-separated)")
+	flag.StringVar(&kubeconfig, "kubeconfig", "", "Path to kubeconfig (uses in-cluster config if empty)")
+	flag.StringVar(&logLevel, "log-level", "info", "Log level (debug, info, warn, error)")
+	flag.StringVar(&slackURL, "slack-webhook", "", "Slack webhook URL for notifications")
+	flag.StringVar(&teamsURL, "teams-webhook", "", "Teams webhook URL for notifications")
+	flag.Parse()
+
+	log.Printf("crossplane-validate-operator %s starting", version)
+
+	config, err := buildConfig(kubeconfig)
+	if err != nil {
+		log.Fatalf("building kubernetes config: %v", err)
+	}
+
+	dynamicClient, err := dynamic.NewForConfig(config)
+	if err != nil {
+		log.Fatalf("creating dynamic client: %v", err)
+	}
+
+	discoveryClient, err := discovery.NewDiscoveryClientForConfig(config)
+	if err != nil {
+		log.Fatalf("creating discovery client: %v", err)
+	}
+
+	var extraGroups []string
+	if watchGroups != "" {
+		extraGroups = strings.Split(watchGroups, ",")
+	}
+
+	cache := operator.NewStateCache(dynamicClient, discoveryClient, extraGroups)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	log.Println("starting state cache, discovering Crossplane resources...")
+	if err := cache.Start(ctx); err != nil {
+		log.Fatalf("starting state cache: %v", err)
+	}
+
+	var notifiers []notify.Notifier
+	if slackURL != "" {
+		notifiers = append(notifiers, notify.NewSlackNotifier(slackURL, ""))
+	}
+	if teamsURL != "" {
+		notifiers = append(notifiers, notify.NewTeamsNotifier(teamsURL))
+	}
+
+	var notifier notify.Notifier
+	if len(notifiers) > 0 {
+		notifier = notify.NewMultiNotifier(notifiers...)
+	}
+
+	server := grpcpkg.NewServer(grpcpkg.ServerConfig{
+		Cache:    cache,
+		Port:     grpcPort,
+		Notifier: notifier,
+	})
+
+	errCh := make(chan error, 2)
+
+	go func() {
+		if err := server.Start(); err != nil {
+			errCh <- fmt.Errorf("gRPC server: %w", err)
+		}
+	}()
+
+	healthSrv := startHealthServer(healthPort, cache)
+
+	log.Printf("operator ready — gRPC :%d, health :%d", grpcPort, healthPort)
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+
+	select {
+	case sig := <-sigCh:
+		log.Printf("received %s, shutting down...", sig)
+	case err := <-errCh:
+		log.Printf("fatal error: %v, shutting down...", err)
+	}
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutdownCancel()
+
+	if err := healthSrv.Shutdown(shutdownCtx); err != nil {
+		log.Printf("health server shutdown: %v", err)
+	}
+	server.Stop()
+	cache.Stop()
+}
+
+func buildConfig(kubeconfig string) (*rest.Config, error) {
+	if kubeconfig == "" {
+		config, err := rest.InClusterConfig()
+		if err == nil {
+			return config, nil
+		}
+		log.Println("not running in-cluster, trying default kubeconfig")
+	}
+
+	if kubeconfig == "" {
+		home, _ := os.UserHomeDir()
+		kubeconfig = home + "/.kube/config"
+	}
+
+	return clientcmd.BuildConfigFromFlags("", kubeconfig)
+}
+
+func startHealthServer(port int, cache *operator.StateCache) *http.Server {
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintln(w, "ok")
+	})
+
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
+		if cache.ResourceCount() == 0 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			fmt.Fprintln(w, "cache not populated")
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, "ok, %d resources cached\n", cache.ResourceCount())
+	})
+
+	srv := &http.Server{
+		Addr:              fmt.Sprintf(":%d", port),
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+
+	go func() {
+		log.Printf("health server listening on %s", srv.Addr)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Printf("health server error: %v", err)
+		}
+	}()
+
+	return srv
+}

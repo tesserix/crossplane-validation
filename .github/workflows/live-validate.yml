@@ -1,0 +1,94 @@
+name: Live Crossplane Validation
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'crossplane-manifests/**'
+      - 'crossplane/**'
+      - '*.yaml'
+
+permissions:
+  contents: read
+  pull-requests: write
+  id-token: write
+
+jobs:
+  live-plan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Authenticate to your cluster.
+      # Uncomment and configure the appropriate auth step for your cloud:
+
+      # AWS EKS
+      # - uses: aws-actions/configure-aws-credentials@v4
+      #   with:
+      #     role-to-assume: arn:aws:iam::123456789012:role/crossplane-validate
+      #     aws-region: us-east-1
+      # - run: aws eks update-kubeconfig --name my-cluster --region us-east-1
+
+      # GKE
+      # - uses: google-github-actions/auth@v2
+      #   with:
+      #     workload_identity_provider: projects/123/locations/global/workloadIdentityPools/github/providers/repo
+      #     service_account: validate@my-project.iam.gserviceaccount.com
+      # - uses: google-github-actions/get-gke-credentials@v2
+      #   with:
+      #     cluster_name: my-cluster
+      #     location: us-central1
+
+      # AKS
+      # - uses: azure/login@v2
+      #   with:
+      #     client-id: ${{ secrets.AZURE_CLIENT_ID }}
+      #     tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+      #     subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      # - uses: azure/aks-set-context@v4
+      #   with:
+      #     resource-group: my-rg
+      #     cluster-name: my-cluster
+
+      - name: Install crossplane-validate
+        run: |
+          curl -sL https://github.com/tesserix/crossplane-validation/releases/latest/download/crossplane-validate-linux-amd64 -o crossplane-validate
+          chmod +x crossplane-validate
+
+      - name: Port-forward to operator
+        run: |
+          kubectl port-forward -n crossplane-system svc/crossplane-validate-operator 9443:9443 &
+          sleep 3
+
+      - name: Run live plan
+        run: |
+          ./crossplane-validate plan \
+            --live \
+            --operator-address=localhost:9443 \
+            --manifests=./crossplane/ \
+            --output=markdown > plan.md 2>/dev/null || true
+
+      - name: Comment on PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const body = fs.readFileSync('plan.md', 'utf8') || '### Crossplane Validation (Live)\n\nNo changes detected.';
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner, repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const existing = comments.find(c => c.body.includes('### Crossplane Validation'));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                comment_id: existing.id, body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: context.issue.number, body,
+              });
+            }

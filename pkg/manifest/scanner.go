@@ -302,6 +302,31 @@ func parseMultiDoc(data []byte) ([]unstructured.Unstructured, error) {
 	return resources, nil
 }
 
+// ParseBytes parses raw YAML bytes (possibly multi-document) into a ResourceSet.
+func ParseBytes(data []byte) (*ResourceSet, error) {
+	rs := &ResourceSet{}
+
+	resources, err := parseMultiDoc(data)
+	if err != nil {
+		return nil, fmt.Errorf("parsing YAML: %w", err)
+	}
+
+	for _, r := range resources {
+		rs.classify(r)
+	}
+
+	return rs, nil
+}
+
+// FromUnstructuredList classifies a list of unstructured objects into a ResourceSet.
+func FromUnstructuredList(items []unstructured.Unstructured) *ResourceSet {
+	rs := &ResourceSet{}
+	for _, item := range items {
+		rs.classify(item)
+	}
+	return rs
+}
+
 func gitListFiles(ref, dir string) ([]string, error) {
 	cmd := exec.Command("git", "ls-tree", "-r", "--name-only", ref, dir)
 	out, err := cmd.Output()

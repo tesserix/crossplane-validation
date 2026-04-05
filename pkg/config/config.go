@@ -11,6 +11,7 @@ type Config struct {
 	ManifestDirs []string            `yaml:"manifests"`
 	Providers    map[string]Provider `yaml:"providers"`
 	Settings     Settings            `yaml:"settings"`
+	Operator     OperatorConfig      `yaml:"operator,omitempty"`
 }
 
 // Provider holds cloud provider configuration for cloud-aware plan.
@@ -41,6 +42,34 @@ type Settings struct {
 	IgnoreFields []string `yaml:"ignore-fields"`
 }
 
+// OperatorConfig holds configuration for the in-cluster operator.
+type OperatorConfig struct {
+	Address     string             `yaml:"address,omitempty"`
+	Namespace   string             `yaml:"namespace,omitempty"`
+	TLS         bool               `yaml:"tls,omitempty"`
+	WatchGroups []string           `yaml:"watch-groups,omitempty"`
+	GRPCPort    int                `yaml:"grpc-port,omitempty"`
+	HealthPort  int                `yaml:"health-port,omitempty"`
+	Notify      NotificationConfig `yaml:"notifications,omitempty"`
+}
+
+// NotificationConfig holds notification channel settings.
+type NotificationConfig struct {
+	Slack *SlackConfig `yaml:"slack,omitempty"`
+	Teams *TeamsConfig `yaml:"teams,omitempty"`
+}
+
+// SlackConfig holds Slack webhook configuration.
+type SlackConfig struct {
+	WebhookURL string `yaml:"webhook-url"`
+	Channel    string `yaml:"channel,omitempty"`
+}
+
+// TeamsConfig holds Microsoft Teams webhook configuration.
+type TeamsConfig struct {
+	WebhookURL string `yaml:"webhook-url"`
+}
+
 // Load reads config from a file. Returns defaults if file doesn't exist.
 func Load(path string) (*Config, error) {
 	cfg := &Config{
@@ -56,6 +85,11 @@ func Load(path string) (*Config, error) {
 				"metadata.generation",
 				"status.conditions",
 			},
+		},
+		Operator: OperatorConfig{
+			Namespace:  "crossplane-system",
+			GRPCPort:   9443,
+			HealthPort: 8081,
 		},
 	}
 
