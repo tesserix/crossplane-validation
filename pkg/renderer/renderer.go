@@ -26,15 +26,14 @@ type RenderedSet struct {
 	Resources []RenderedResource
 }
 
-// Render takes a ResourceSet and produces the final set of managed resources
-// that Crossplane would create/manage.
-//
-// For direct managed resources, they pass through as-is.
-// For Claims/XRs with Compositions, it renders the composition to produce MRs.
+// Render produces the managed resources that Crossplane would create from a ResourceSet.
+// It automatically selects the best rendering strategy:
+//   - If Docker + crossplane CLI are available: uses `crossplane render` (full fidelity,
+//     supports all composition functions including go-templating)
+//   - Otherwise: uses built-in renderer (Patch-and-Transform only, best effort for pipelines)
 func Render(rs *manifest.ResourceSet) (*RenderedSet, error) {
 	rendered := &RenderedSet{}
 
-	// Direct managed resources pass through
 	for _, mr := range rs.ManagedResources {
 		rendered.Resources = append(rendered.Resources, RenderedResource{
 			Source:   "direct",
@@ -42,32 +41,48 @@ func Render(rs *manifest.ResourceSet) (*RenderedSet, error) {
 		})
 	}
 
-	// Render compositions for each XR/Claim
-	composites := append(rs.XRs, rs.Claims...)
-	for _, xr := range composites {
-		comp, err := findComposition(rs.Compositions, xr)
-		if err != nil {
-			// No matching composition — treat XR as informational
-			rendered.Resources = append(rendered.Resources, RenderedResource{
-				Source:   "unresolved-xr",
-				Resource: xr,
-			})
-			continue
-		}
+	hasComposites := len(rs.XRs) > 0 || len(rs.Claims) > 0
+	if !hasComposites {
+		return rendered, nil
+	}
 
-		mrs, err := renderComposition(xr, comp, rs.Functions)
+	useCrossplane := CanUseCrossplaneRender() && len(rs.Functions) > 0
+	if useCrossplane {
+		fmt.Println("  Using crossplane render (Docker + Functions detected)")
+		compositeResults, err := renderWithCrossplane(rs)
 		if err != nil {
-			return nil, fmt.Errorf("rendering composition %s for %s/%s: %w",
-				comp.GetName(), xr.GetKind(), xr.GetName(), err)
+			return nil, err
 		}
+		rendered.Resources = append(rendered.Resources, compositeResults...)
+	} else {
+		if !CanUseCrossplaneRender() && len(rs.Functions) > 0 {
+			fmt.Println("  Docker or crossplane CLI not available — using built-in renderer (limited)")
+		}
+		composites := append(rs.XRs, rs.Claims...)
+		for _, xr := range composites {
+			comp, err := findComposition(rs.Compositions, xr)
+			if err != nil {
+				rendered.Resources = append(rendered.Resources, RenderedResource{
+					Source:   "unresolved-xr",
+					Resource: xr,
+				})
+				continue
+			}
 
-		compName := comp.GetName()
-		for _, mr := range mrs {
-			rendered.Resources = append(rendered.Resources, RenderedResource{
-				Source:         fmt.Sprintf("composition/%s", compName),
-				CompositionRef: compName,
-				Resource:       mr,
-			})
+			mrs, err := renderComposition(xr, comp, rs.Functions)
+			if err != nil {
+				return nil, fmt.Errorf("rendering composition %s for %s/%s: %w",
+					comp.GetName(), xr.GetKind(), xr.GetName(), err)
+			}
+
+			compName := comp.GetName()
+			for _, mr := range mrs {
+				rendered.Resources = append(rendered.Resources, RenderedResource{
+					Source:         fmt.Sprintf("composition/%s", compName),
+					CompositionRef: compName,
+					Resource:       mr,
+				})
+			}
 		}
 	}
 

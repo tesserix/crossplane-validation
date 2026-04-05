@@ -161,16 +161,22 @@ func diffCmd() *cobra.Command {
 }
 
 func renderCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "render [path]",
+	var functionsDir string
+
+	cmd := &cobra.Command{
+		Use:   "render [path...]",
 		Short: "Render compositions and show resulting managed resources",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			dir := "."
+			dirs := []string{"."}
 			if len(args) > 0 {
-				dir = args[0]
+				dirs = args
 			}
 
-			manifests, err := manifest.Scan([]string{dir})
+			if functionsDir != "" {
+				dirs = append(dirs, functionsDir)
+			}
+
+			manifests, err := manifest.Scan(dirs)
 			if err != nil {
 				return err
 			}
@@ -183,19 +189,23 @@ func renderCmd() *cobra.Command {
 			return renderer.Print(rendered, os.Stdout)
 		},
 	}
+
+	cmd.Flags().StringVarP(&functionsDir, "functions", "f", "", "Directory containing Function definitions (auto-detected if in same tree)")
+	return cmd
 }
 
 func scanCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "scan [path]",
-		Short: "Scan a directory and show all detected Crossplane resources",
+		Use:   "scan [path...]",
+		Short: "Scan directories and show all detected Crossplane resources",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			dir := "."
+			dirs := []string{"."}
 			if len(args) > 0 {
-				dir = args[0]
+				dirs = args
 			}
 
-			rs, err := manifest.Scan([]string{dir})
+			dir := dirs[0]
+			rs, err := manifest.Scan(dirs)
 			if err != nil {
 				return err
 			}
