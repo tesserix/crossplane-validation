@@ -146,8 +146,33 @@ func convertResource(r renderer.RenderedResource, providers map[string]config.Pr
 
 	attrs := extractForProvider(res)
 
-	if _, hasName := attrs["name"]; !hasName {
-		attrs["name"] = res.GetName()
+	// Use the external-name annotation or status.atProvider.name as the real cloud name
+	// instead of the Crossplane resource name (which often has hash suffixes)
+	externalName := ""
+	if ann := res.GetAnnotations(); ann != nil {
+		externalName = ann["crossplane.io/external-name"]
+	}
+	if externalName == "" {
+		externalName, _, _ = unstructured.NestedString(res.Object, "status", "atProvider", "name")
+	}
+
+	// Some resources don't need or want a name attribute
+	if !resourceSkipsName(tfType) {
+		if externalName != "" {
+			attrs["name"] = externalName
+		} else if _, hasName := attrs["name"]; !hasName {
+			attrs["name"] = res.GetName()
+		}
+	} else {
+		delete(attrs, "name")
+	}
+
+	// Enrich with status.atProvider fields that aren't in forProvider (computed values)
+	enrichFromAtProvider(res, attrs, tfType)
+
+	// Validate that required fields are present
+	if err := validateRequiredFields(tfType, attrs); err != nil {
+		return Block{}, err
 	}
 
 	importID := resolveImportID(res, tfType, attrs, providers)
@@ -324,24 +349,117 @@ func guessProvider(group string) string {
 func extractForProvider(res unstructured.Unstructured) map[string]interface{} {
 	fp, found, _ := unstructured.NestedMap(res.Object, "spec", "forProvider")
 	if found {
-		return flattenForTerraform(fp)
+		cleaned := cleanCrossplaneFields(fp)
+		return flattenForTerraform(cleaned)
 	}
 
 	// Fallback to spec
 	spec, found, _ := unstructured.NestedMap(res.Object, "spec")
 	if found {
-		// Remove Crossplane-specific fields
-		delete(spec, "providerConfigRef")
-		delete(spec, "publishConnectionDetailsTo")
-		delete(spec, "writeConnectionSecretToRef")
-		delete(spec, "compositionRef")
-		delete(spec, "compositionSelector")
-		delete(spec, "managementPolicies")
-		delete(spec, "deletionPolicy")
-		return flattenForTerraform(spec)
+		cleaned := cleanCrossplaneFields(spec)
+		return flattenForTerraform(cleaned)
 	}
 
 	return map[string]interface{}{}
+}
+
+// enrichFromAtProvider adds computed fields from status.atProvider that are required
+// for Terraform but not present in spec.forProvider (e.g., kubernetes_cluster_id on node pools).
+func enrichFromAtProvider(res unstructured.Unstructured, attrs map[string]interface{}, tfType string) {
+	atProvider, found, _ := unstructured.NestedMap(res.Object, "status", "atProvider")
+	if !found {
+		return
+	}
+
+	// Required computed fields that Terraform needs but Crossplane stores in atProvider
+	requiredFields := map[string][]string{
+		"azurerm_kubernetes_cluster_node_pool": {"kubernetesClusterId"},
+		"azurerm_subnet":                       {"virtualNetworkName"},
+	}
+
+	if fields, ok := requiredFields[tfType]; ok {
+		for _, field := range fields {
+			tfField := camelToSnake(field)
+			if _, exists := attrs[tfField]; !exists {
+				if v, ok := atProvider[field]; ok {
+					attrs[tfField] = v
+				}
+			}
+		}
+	}
+
+	// Also check the full atProvider for the ID if it's an Azure resource
+	if id, ok := atProvider["id"].(string); ok && id != "" && strings.HasPrefix(tfType, "azurerm_") {
+		// For node pools, extract kubernetes_cluster_id from the resource ID
+		if tfType == "azurerm_kubernetes_cluster_node_pool" {
+			if _, exists := attrs["kubernetes_cluster_id"]; !exists {
+				// ID format: /subscriptions/.../managedClusters/{cluster}/agentPools/{pool}
+				if idx := strings.Index(id, "/agentPools/"); idx > 0 {
+					attrs["kubernetes_cluster_id"] = id[:idx]
+				}
+			}
+		}
+	}
+
+	// Remove known default/invalid values that Azure sets but Terraform rejects
+	removeDefaults(attrs, tfType)
+
+	// Also grab the resource ID for import
+	if id, ok := atProvider["id"].(string); ok && id != "" {
+		if _, exists := attrs["_import_id"]; !exists {
+			attrs["_import_id"] = id
+		}
+	}
+
+	// Remove the _import_id from final attrs (used internally only)
+	delete(attrs, "_import_id")
+}
+
+// removeDefaults strips Azure default values that are invalid in Terraform HCL.
+func removeDefaults(attrs map[string]interface{}, tfType string) {
+	// $account-encryption-key is Azure's internal default, invalid in TF
+	if v, ok := attrs["default_encryption_scope"].(string); ok && strings.HasPrefix(v, "$") {
+		_ = v
+		delete(attrs, "default_encryption_scope")
+		delete(attrs, "encryption_scope_override_enabled")
+	}
+}
+
+func snakeToCamel(s string) string {
+	parts := strings.Split(s, "_")
+	for i := 1; i < len(parts); i++ {
+		if len(parts[i]) > 0 {
+			parts[i] = strings.ToUpper(parts[i][:1]) + parts[i][1:]
+		}
+	}
+	return strings.Join(parts, "")
+}
+
+// cleanCrossplaneFields removes Crossplane-specific fields that shouldn't appear in HCL.
+func cleanCrossplaneFields(m map[string]interface{}) map[string]interface{} {
+	crossplaneKeys := []string{
+		"providerConfigRef", "publishConnectionDetailsTo", "writeConnectionSecretToRef",
+		"compositionRef", "compositionSelector", "managementPolicies", "deletionPolicy",
+		"resourceRefs", "crossplane", "initProvider", "managementPolicy",
+		"compositionRevisionRef", "compositionUpdatePolicy", "environmentConfigRefs",
+	}
+	for _, key := range crossplaneKeys {
+		delete(m, key)
+	}
+
+	// Recursively clean nested maps and remove reference fields
+	for k, v := range m {
+		if strings.HasSuffix(k, "Ref") || strings.HasSuffix(k, "Refs") ||
+			strings.HasSuffix(k, "Selector") || strings.HasSuffix(k, "SecretRef") {
+			delete(m, k)
+			continue
+		}
+		if nested, ok := v.(map[string]interface{}); ok {
+			m[k] = cleanCrossplaneFields(nested)
+		}
+	}
+
+	return m
 }
 
 // flattenForTerraform converts Crossplane field naming to Terraform conventions.
@@ -360,8 +478,24 @@ func flattenForTerraform(m map[string]interface{}) map[string]interface{} {
 		switch val := v.(type) {
 		case map[string]interface{}:
 			result[tfKey] = flattenForTerraform(val)
+		case []interface{}:
+			result[tfKey] = flattenSlice(val)
 		default:
 			result[tfKey] = val
+		}
+	}
+	return result
+}
+
+// flattenSlice handles list/array fields, recursively flattening nested maps.
+func flattenSlice(items []interface{}) []interface{} {
+	result := make([]interface{}, 0, len(items))
+	for _, item := range items {
+		switch v := item.(type) {
+		case map[string]interface{}:
+			result = append(result, flattenForTerraform(v))
+		default:
+			result = append(result, v)
 		}
 	}
 	return result
@@ -387,6 +521,35 @@ func camelToSnake(s string) string {
 		}
 	}
 	return result.String()
+}
+
+// validateRequiredFields checks that mandatory Terraform fields are present.
+// Returns an error (causing the resource to be skipped) if they're missing.
+func validateRequiredFields(tfType string, attrs map[string]interface{}) error {
+	required := map[string][]string{
+		"azurerm_kubernetes_cluster_node_pool": {"kubernetes_cluster_id"},
+	}
+
+	if fields, ok := required[tfType]; ok {
+		for _, f := range fields {
+			if _, exists := attrs[f]; !exists {
+				return fmt.Errorf("missing required field %q (resolved from Crossplane references)", f)
+			}
+		}
+	}
+	return nil
+}
+
+// resourceSkipsName returns true for Terraform resource types that don't accept
+// a "name" argument (association resources, role assignments with UUID names, etc.)
+func resourceSkipsName(tfType string) bool {
+	skipNameResources := map[string]bool{
+		"azurerm_subnet_network_security_group_association": true,
+		"azurerm_subnet_route_table_association":            true,
+		"azurerm_subnet_nat_gateway_association":            true,
+		"azurerm_role_assignment":                           true,
+	}
+	return skipNameResources[tfType]
 }
 
 func sanitizeName(name string) string {
@@ -635,6 +798,7 @@ func guessTerraformType(group, kind string) string {
 
 var mapStyleFields = map[string]bool{
 	"tags": true, "labels": true, "annotations": true, "environment": true,
+	"node_labels": true, "default_node_pool_tags": true,
 }
 
 func writeAttributes(sb *strings.Builder, attrs map[string]interface{}, indent string) {
@@ -655,13 +819,63 @@ func writeAttributes(sb *strings.Builder, attrs map[string]interface{}, indent s
 				writeAttributes(sb, val, indent+"  ")
 				sb.WriteString(fmt.Sprintf("%s}\n", indent))
 			}
+		case []interface{}:
+			writeList(sb, k, val, indent)
 		case string:
 			sb.WriteString(fmt.Sprintf("%s%s = %q\n", indent, k, val))
 		case bool:
 			sb.WriteString(fmt.Sprintf("%s%s = %v\n", indent, k, val))
+		case float64:
+			if val == float64(int64(val)) {
+				sb.WriteString(fmt.Sprintf("%s%s = %d\n", indent, k, int64(val)))
+			} else {
+				sb.WriteString(fmt.Sprintf("%s%s = %v\n", indent, k, val))
+			}
 		default:
 			sb.WriteString(fmt.Sprintf("%s%s = %q\n", indent, k, fmt.Sprintf("%v", val)))
 		}
+	}
+}
+
+func writeList(sb *strings.Builder, key string, items []interface{}, indent string) {
+	if len(items) == 0 {
+		sb.WriteString(fmt.Sprintf("%s%s = []\n", indent, key))
+		return
+	}
+
+	// Check if it's a list of primitives (strings, numbers) or a list of objects
+	hasObjects := false
+	for _, item := range items {
+		if _, ok := item.(map[string]interface{}); ok {
+			hasObjects = true
+			break
+		}
+	}
+
+	if hasObjects {
+		// List of objects → dynamic blocks or repeated blocks
+		for _, item := range items {
+			if obj, ok := item.(map[string]interface{}); ok {
+				sb.WriteString(fmt.Sprintf("%s%s {\n", indent, key))
+				writeAttributes(sb, obj, indent+"  ")
+				sb.WriteString(fmt.Sprintf("%s}\n", indent))
+			}
+		}
+	} else {
+		// List of primitives → HCL list
+		sb.WriteString(fmt.Sprintf("%s%s = [", indent, key))
+		for i, item := range items {
+			if i > 0 {
+				sb.WriteString(", ")
+			}
+			switch v := item.(type) {
+			case string:
+				sb.WriteString(fmt.Sprintf("%q", v))
+			default:
+				sb.WriteString(fmt.Sprintf("%v", v))
+			}
+		}
+		sb.WriteString("]\n")
 	}
 }
 
