@@ -130,7 +130,7 @@ notifications:
     enabled: false
     webhookUrl: ""
 
-# Pod disruption budget (for HA setups with replicaCount > 1)
+# Pod disruption budget — ensures AKS node upgrades can drain pods gracefully
 podDisruptionBudget:
-  enabled: false
-  minAvailable: 1
+  enabled: true
+  maxUnavailable: 1
