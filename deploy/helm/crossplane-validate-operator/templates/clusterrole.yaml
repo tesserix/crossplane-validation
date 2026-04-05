@@ -6,25 +6,25 @@ metadata:
   labels:
     {{- include "operator.labels" . | nindent 4 }}
 rules:
+  # Crossplane core resources
   - apiGroups: ["apiextensions.crossplane.io"]
     resources: ["*"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["pkg.crossplane.io"]
     resources: ["*"]
     verbs: ["get", "list", "watch"]
-  - apiGroups: ["*.upbound.io"]
-    resources: ["*"]
-    verbs: ["get", "list", "watch"]
+  # CRD discovery
   - apiGroups: ["apiextensions.k8s.io"]
     resources: ["customresourcedefinitions"]
     verbs: ["get", "list", "watch"]
+  # Secrets (for reading ProviderConfig credentials)
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["get"]
-    resourceNames: []
-  {{- range .Values.rbac.watchGroups }}
-  - apiGroups: ["{{ . }}"]
+  # Broad read-only for all Crossplane provider CRDs and XR types.
+  # The operator dynamically discovers which API groups have Crossplane
+  # resources — it needs list/watch on all of them.
+  - apiGroups: ["*"]
     resources: ["*"]
     verbs: ["get", "list", "watch"]
-  {{- end }}
 {{- end }}

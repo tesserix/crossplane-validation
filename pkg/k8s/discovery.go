@@ -117,6 +117,36 @@ func shouldWatch(group string, extraGroups map[string]bool) bool {
 	return false
 }
 
+// excludedGroups are API groups that are NOT Crossplane XR types.
+var excludedGroups = map[string]bool{
+	"argoproj.io": true, "fluxcd.io": true,
+	"velero.io": true, "kargo.akuity.io": true,
+	"knative.dev": true, "serving.knative.dev": true, "sources.knative.dev": true,
+	"eventing.knative.dev": true, "messaging.knative.dev": true,
+	"gatekeeper.sh": true, "templates.gatekeeper.sh": true, "constraints.gatekeeper.sh": true,
+	"config.gatekeeper.sh": true, "status.gatekeeper.sh": true,
+	"crd.projectcalico.org": true, "projectcalico.org": true,
+	"istio.io": true, "networking.istio.io": true, "security.istio.io": true,
+	"telemetry.istio.io": true, "extensions.istio.io": true,
+	"cert-manager.io": true, "acme.cert-manager.io": true,
+	"monitoring.coreos.com": true, "logging.banzaicloud.io": true,
+	"keda.sh": true, "snapshot.storage.k8s.io": true,
+	"metrics.k8s.io": true, "external-secrets.io": true,
+	"generators.external-secrets.io": true,
+}
+
+func isExcludedGroup(group string) bool {
+	if excludedGroups[group] {
+		return true
+	}
+	for excluded := range excludedGroups {
+		if strings.HasSuffix(group, "."+excluded) {
+			return true
+		}
+	}
+	return false
+}
+
 func isXRAPIGroup(group string, r metav1.APIResource) bool {
 	if IsCrossplaneGroup(group) {
 		return false
@@ -124,7 +154,7 @@ func isXRAPIGroup(group string, r metav1.APIResource) bool {
 	if isCoreKubernetesGroup(group) {
 		return false
 	}
-	if strings.Contains(group, "argoproj.io") || strings.Contains(group, "fluxcd.io") {
+	if isExcludedGroup(group) {
 		return false
 	}
 	if strings.Contains(group, ".") && hasVerb(r, "list") {
