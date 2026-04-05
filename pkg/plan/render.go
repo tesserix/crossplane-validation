@@ -88,18 +88,39 @@ func renderTerminal(r *Result, w io.Writer) error {
 	fmt.Fprintln(w, "═══ Structural Changes ═══")
 	fmt.Fprintln(w)
 
+	// Group diffs by action for clearer output
+	grouped := map[diff.Action][]diff.ResourceDiff{}
 	for _, rd := range d.Diffs {
-		prefix, color := actionStyle(rd.Action)
-		if rd.Namespace != "" {
-			fmt.Fprintf(w, "  %s%s %s/%s (namespace: %s)%s\n", color, prefix, rd.Kind, rd.Name, rd.Namespace, resetColor)
-		} else {
-			fmt.Fprintf(w, "  %s%s %s/%s%s\n", color, prefix, rd.Kind, rd.Name, resetColor)
+		grouped[rd.Action] = append(grouped[rd.Action], rd)
+	}
+
+	for _, action := range []diff.Action{diff.ActionDelete, diff.ActionUpdate, diff.ActionCreate} {
+		diffs := grouped[action]
+		if len(diffs) == 0 {
+			continue
 		}
 
-		for _, fc := range rd.FieldChanges {
-			renderFieldChange(w, fc, "      ")
+		label := actionLabel(action)
+		fmt.Fprintf(w, "  %s── %s (%d) ──%s\n\n", actionColor(action), label, len(diffs), resetColor)
+
+		for _, rd := range diffs {
+			prefix, color := actionStyle(rd.Action)
+			provider := extractProvider(rd.APIVersion)
+			nsLabel := ""
+			if rd.Namespace != "" {
+				nsLabel = fmt.Sprintf(" [ns: %s]", rd.Namespace)
+			}
+			provLabel := ""
+			if provider != "" {
+				provLabel = fmt.Sprintf(" %s(%s)%s", dim, provider, resetColor)
+			}
+			fmt.Fprintf(w, "  %s%s %s/%s%s%s%s\n", color, prefix, rd.Kind, rd.Name, nsLabel, provLabel, resetColor)
+
+			for _, fc := range rd.FieldChanges {
+				renderFieldChange(w, fc, "      ")
+			}
+			fmt.Fprintln(w)
 		}
-		fmt.Fprintln(w)
 	}
 
 	if r.CloudPlan != nil && r.CloudPlan.HasChanges {
@@ -117,7 +138,24 @@ func renderTerminal(r *Result, w io.Writer) error {
 		}
 	}
 
-	fmt.Fprintf(w, "Plan: %s\n", d.Summary.String())
+	// Summary line
+	fmt.Fprintf(w, "───────────────────────────────────\n")
+	fmt.Fprintf(w, "Plan: ")
+	parts := []string{}
+	if d.Summary.ToAdd > 0 {
+		parts = append(parts, fmt.Sprintf("%s%d to add%s", green, d.Summary.ToAdd, resetColor))
+	}
+	if d.Summary.ToChange > 0 {
+		parts = append(parts, fmt.Sprintf("%s%d to change%s", yellow, d.Summary.ToChange, resetColor))
+	}
+	if d.Summary.ToDelete > 0 {
+		parts = append(parts, fmt.Sprintf("%s%d to destroy%s", red, d.Summary.ToDelete, resetColor))
+	}
+	if len(parts) == 0 {
+		fmt.Fprintln(w, "no changes")
+	} else {
+		fmt.Fprintln(w, strings.Join(parts, ", "))
+	}
 	if r.CloudPlan != nil {
 		fmt.Fprintf(w, "Cloud: %d to add, %d to change, %d to destroy\n",
 			r.CloudPlan.Summary.Add, r.CloudPlan.Summary.Change, r.CloudPlan.Summary.Destroy)
@@ -127,33 +165,151 @@ func renderTerminal(r *Result, w io.Writer) error {
 	return nil
 }
 
+func actionLabel(a diff.Action) string {
+	switch a {
+	case diff.ActionCreate:
+		return "Resources to Add"
+	case diff.ActionDelete:
+		return "Resources to Destroy"
+	case diff.ActionUpdate:
+		return "Resources to Update"
+	default:
+		return "Resources"
+	}
+}
+
+func actionColor(a diff.Action) string {
+	switch a {
+	case diff.ActionCreate:
+		return green
+	case diff.ActionDelete:
+		return red
+	case diff.ActionUpdate:
+		return yellow
+	default:
+		return ""
+	}
+}
+
+func extractProvider(apiVersion string) string {
+	if apiVersion == "" {
+		return ""
+	}
+	parts := strings.Split(apiVersion, "/")
+	group := parts[0]
+	switch {
+	case strings.Contains(group, "aws"):
+		return "AWS"
+	case strings.Contains(group, "gcp"):
+		return "GCP"
+	case strings.Contains(group, "azure") && !strings.Contains(group, "azuread"):
+		return "Azure"
+	case strings.Contains(group, "azuread"):
+		return "Azure AD"
+	case strings.Contains(group, "datadog"):
+		return "Datadog"
+	case strings.Contains(group, "crossplane"):
+		return "Crossplane"
+	case strings.Contains(group, "upbound"):
+		return strings.Split(group, ".")[0]
+	}
+	return ""
+}
+
 func renderMarkdown(r *Result, w io.Writer) error {
 	d := r.StructuralDiff
-	if d == nil || (len(d.Diffs) == 0 && r.CloudPlan == nil) {
+	hasChanges := d != nil && len(d.Diffs) > 0
+	hasCloud := r.CloudPlan != nil && r.CloudPlan.HasChanges
+	hasValidation := len(r.ValidationIssues) > 0
+
+	if !hasChanges && !hasCloud && !hasValidation {
 		fmt.Fprintln(w, "### Crossplane Validation\n\nNo changes detected.")
 		return nil
 	}
 
 	fmt.Fprintln(w, "### Crossplane Validation")
 	fmt.Fprintln(w)
-	fmt.Fprintf(w, "**Plan:** %s\n\n", d.Summary.String())
 
-	deletions, highRisk := collectWarnings(d)
-	renderWarningsMarkdown(w, deletions, highRisk)
+	// Summary table
+	if hasChanges {
+		fmt.Fprintf(w, "**Plan:** %s\n\n", d.Summary.String())
+	}
 
-	if len(d.Diffs) > 0 {
+	// Validation issues
+	if hasValidation {
+		errorCount, warningCount := 0, 0
+		for _, issue := range r.ValidationIssues {
+			if issue.Severity == "error" {
+				errorCount++
+			} else {
+				warningCount++
+			}
+		}
+
 		fmt.Fprintln(w, "<details>")
-		fmt.Fprintln(w, "<summary>Structural Changes</summary>")
+		fmt.Fprintf(w, "<summary>Validation (%d errors, %d warnings)</summary>\n", errorCount, warningCount)
+		fmt.Fprintln(w)
+
+		if errorCount > 0 {
+			fmt.Fprintln(w, "**Errors:**")
+			for _, issue := range r.ValidationIssues {
+				if issue.Severity != "error" {
+					continue
+				}
+				field := ""
+				if issue.Field != "" {
+					field = " `" + issue.Field + "`:"
+				}
+				fmt.Fprintf(w, "- :x: **%s**%s %s\n", issue.Resource, field, issue.Message)
+			}
+			fmt.Fprintln(w)
+		}
+
+		if warningCount > 0 {
+			fmt.Fprintln(w, "**Warnings:**")
+			for _, issue := range r.ValidationIssues {
+				if issue.Severity != "warning" {
+					continue
+				}
+				field := ""
+				if issue.Field != "" {
+					field = " `" + issue.Field + "`:"
+				}
+				fmt.Fprintf(w, "- :warning: **%s**%s %s\n", issue.Resource, field, issue.Message)
+			}
+			fmt.Fprintln(w)
+		}
+
+		fmt.Fprintln(w, "</details>")
+		fmt.Fprintln(w)
+	}
+
+	// Warnings
+	if hasChanges {
+		deletions, highRisk := collectWarnings(d)
+		renderWarningsMarkdown(w, deletions, highRisk)
+	}
+
+	// Structural changes
+	if hasChanges {
+		fmt.Fprintln(w, "<details>")
+		summary := fmt.Sprintf("Structural Changes (%d resources affected)", len(d.Diffs))
+		fmt.Fprintf(w, "<summary>%s</summary>\n", summary)
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "```diff")
 
 		for _, rd := range d.Diffs {
 			prefix := actionPrefix(string(rd.Action))
-			if rd.Namespace != "" {
-				fmt.Fprintf(w, "%s %s/%s (namespace: %s)\n", prefix, rd.Kind, rd.Name, rd.Namespace)
-			} else {
-				fmt.Fprintf(w, "%s %s/%s\n", prefix, rd.Kind, rd.Name)
+			provider := extractProvider(rd.APIVersion)
+			provLabel := ""
+			if provider != "" {
+				provLabel = fmt.Sprintf("  # %s", provider)
 			}
+			nsLabel := ""
+			if rd.Namespace != "" {
+				nsLabel = fmt.Sprintf(" (ns: %s)", rd.Namespace)
+			}
+			fmt.Fprintf(w, "%s %s/%s%s%s\n", prefix, rd.Kind, rd.Name, nsLabel, provLabel)
 			for _, fc := range rd.FieldChanges {
 				renderFieldChangeDiff(w, fc, "    ")
 			}
@@ -163,10 +319,11 @@ func renderMarkdown(r *Result, w io.Writer) error {
 		fmt.Fprintln(w, "</details>")
 	}
 
-	if r.CloudPlan != nil && r.CloudPlan.HasChanges {
+	// Cloud impact
+	if hasCloud {
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "<details>")
-		fmt.Fprintln(w, "<summary>Cloud Impact</summary>")
+		fmt.Fprintln(w, "<summary>Cloud Impact (OpenTofu)</summary>")
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "```diff")
 
@@ -228,15 +385,32 @@ func renderJSON(r *Result, w io.Writer) error {
 		}
 	}
 
+	for _, issue := range r.ValidationIssues {
+		out.Validation = append(out.Validation, jsonValidationIssue{
+			Severity: issue.Severity,
+			Resource: issue.Resource,
+			Field:    issue.Field,
+			Message:  issue.Message,
+		})
+	}
+
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	return enc.Encode(out)
 }
 
 type jsonOutput struct {
-	Changes []jsonChange   `json:"changes"`
-	Summary jsonSummary    `json:"summary"`
-	Cloud   *jsonCloudPlan `json:"cloud,omitempty"`
+	Changes    []jsonChange          `json:"changes"`
+	Summary    jsonSummary           `json:"summary"`
+	Cloud      *jsonCloudPlan        `json:"cloud,omitempty"`
+	Validation []jsonValidationIssue `json:"validation,omitempty"`
+}
+
+type jsonValidationIssue struct {
+	Severity string `json:"severity"`
+	Resource string `json:"resource"`
+	Field    string `json:"field,omitempty"`
+	Message  string `json:"message"`
 }
 
 type jsonChange struct {
@@ -356,6 +530,7 @@ const (
 	green      = "\033[32m"
 	red        = "\033[31m"
 	yellow     = "\033[33m"
+	dim        = "\033[2m"
 	resetColor = "\033[0m"
 )
 
@@ -477,7 +652,7 @@ func renderWarningsMarkdown(w io.Writer, deletions, highRisk []warning) {
 
 // StripColors removes ANSI color codes for non-terminal output.
 func StripColors(s string) string {
-	for _, code := range []string{green, red, yellow, resetColor} {
+	for _, code := range []string{green, red, yellow, dim, resetColor} {
 		s = strings.ReplaceAll(s, code, "")
 	}
 	return s

@@ -418,8 +418,8 @@ func TestSensitiveFieldMaskingOnCreate(t *testing.T) {
 		Resources: []renderer.RenderedResource{
 			makeMR("sql.gcp.upbound.io/v1beta2", "DatabaseInstance", "db", map[string]interface{}{
 				"region":         "us-east-1",
-				"masterPassword": "super-secret-123",
-				"apiKey":         "ak_12345",
+				"masterPassword": "PLACEHOLDER_TEST_VALUE",
+				"apiKey":         "PLACEHOLDER_API_KEY",
 			}),
 		},
 	}
@@ -450,7 +450,7 @@ func TestSensitiveFieldMaskingOnUpdate(t *testing.T) {
 		Resources: []renderer.RenderedResource{
 			makeMR("sql.gcp.upbound.io/v1beta2", "DatabaseInstance", "db", map[string]interface{}{
 				"region":   "us-east-1",
-				"password": "old-pass",
+				"password": "PLACEHOLDER_OLD",
 			}),
 		},
 	}
@@ -459,7 +459,7 @@ func TestSensitiveFieldMaskingOnUpdate(t *testing.T) {
 		Resources: []renderer.RenderedResource{
 			makeMR("sql.gcp.upbound.io/v1beta2", "DatabaseInstance", "db", map[string]interface{}{
 				"region":   "us-east-1",
-				"password": "new-pass",
+				"password": "PLACEHOLDER_NEW",
 			}),
 		},
 	}
@@ -487,7 +487,7 @@ func TestSensitiveFieldMaskingOnDelete(t *testing.T) {
 		Resources: []renderer.RenderedResource{
 			makeMR("sql.gcp.upbound.io/v1beta2", "DatabaseInstance", "db", map[string]interface{}{
 				"region": "us-east-1",
-				"token":  "tok_abc123",
+				"token":  "PLACEHOLDER_TOKEN",
 			}),
 		},
 	}
@@ -515,7 +515,7 @@ func TestShowSensitiveBypassesMasking(t *testing.T) {
 	target := &renderer.RenderedSet{
 		Resources: []renderer.RenderedResource{
 			makeMR("sql.gcp.upbound.io/v1beta2", "DatabaseInstance", "db", map[string]interface{}{
-				"password": "plaintext-pass",
+				"password": "PLACEHOLDER_VISIBLE",
 			}),
 		},
 	}
@@ -525,7 +525,7 @@ func TestShowSensitiveBypassesMasking(t *testing.T) {
 	for _, d := range result.Diffs {
 		for _, fc := range d.FieldChanges {
 			if fc.Path == "spec.forProvider.password" {
-				if fc.NewValue != "plaintext-pass" {
+				if fc.NewValue != "PLACEHOLDER_VISIBLE" {
 					t.Errorf("expected plain value with ShowSensitive=true, got %v", fc.NewValue)
 				}
 			}
