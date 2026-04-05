@@ -206,15 +206,15 @@ func (v *ValidationServiceImpl) ComputePlan(ctx context.Context, proposedYAML []
 					r := res
 					composedChanges, tree := operator.ResolveComposedChanges(v.cache, &r, changedFields)
 					for _, cc := range composedChanges {
-						var fields []*ComposedField
+						var fields []ComposedFieldChange
 						for _, f := range cc.FieldChanges {
-							fields = append(fields, &ComposedField{
+							fields = append(fields, ComposedFieldChange{
 								Path:     f.Path,
 								OldValue: f.OldValue,
 								NewValue: f.NewValue,
 							})
 						}
-						resp.ComposedChanges = append(resp.ComposedChanges, &ComposedResourceChange{
+						resp.ComposedChanges = append(resp.ComposedChanges, ComposedResourceChange{
 							ResourceKind:    cc.ResourceKind,
 							ResourceName:    cc.ResourceName,
 							APIVersion:      cc.APIVersion,
@@ -224,7 +224,7 @@ func (v *ValidationServiceImpl) ComputePlan(ctx context.Context, proposedYAML []
 						})
 					}
 					if tree != nil && len(tree.Children) > 0 {
-						resp.ResourceTree = append(resp.ResourceTree, convertTree(tree))
+						resp.ResourceTree = append(resp.ResourceTree, *convertTree(tree))
 					}
 				}
 			}
@@ -282,6 +282,51 @@ func (v *ValidationServiceImpl) GetDrift(ctx context.Context, gitYAML []byte) (*
 			})
 		}
 		resp.Drifts = append(resp.Drifts, entry)
+	}
+
+	return resp, nil
+}
+
+// ResolveResources takes proposed manifests (Claims/XRs) and resolves them through
+// the composition chain to return the actual managed resources from the live cluster.
+func (v *ValidationServiceImpl) ResolveResources(ctx context.Context, proposedYAML []byte) (*ResolveResourcesResponse, error) {
+	if len(proposedYAML) == 0 {
+		return nil, fmt.Errorf("proposed manifests cannot be empty")
+	}
+
+	proposed, err := manifest.ParseBytes(proposedYAML)
+	if err != nil {
+		return nil, fmt.Errorf("parsing manifests: %w", err)
+	}
+
+	var allResolved []unstructured.Unstructured
+
+	// Resolve Claims
+	for _, claim := range proposed.Claims {
+		resolved := operator.ResolveAllManagedResources(v.cache, &claim)
+		allResolved = append(allResolved, resolved...)
+	}
+
+	// Resolve XRs
+	for _, xr := range proposed.XRs {
+		resolved := operator.ResolveAllManagedResources(v.cache, &xr)
+		allResolved = append(allResolved, resolved...)
+	}
+
+	// Include direct managed resources as-is
+	allResolved = append(allResolved, proposed.ManagedResources...)
+
+	resp := &ResolveResourcesResponse{
+		Total: int32(len(allResolved)),
+	}
+
+	for _, res := range allResolved {
+		protoRes, err := toProtoResource(res)
+		if err != nil {
+			log.Printf("skipping resource %s/%s: %v", res.GetKind(), res.GetName(), err)
+			continue
+		}
+		resp.Resources = append(resp.Resources, protoRes)
 	}
 
 	return resp, nil
@@ -446,38 +491,13 @@ type Condition struct {
 // ComputePlanResponse contains the plan result, validation issues, and drift warnings.
 type ComputePlanResponse struct {
 	Plan             *PlanResult
-	ComposedChanges  []*ComposedResourceChange `json:",omitempty"`
-	ResourceTree     []*ResourceTreeNode       `json:",omitempty"`
+	ComposedChanges  []ComposedResourceChange `json:",omitempty"`
+	ResourceTree     []ResourceTreeNode       `json:",omitempty"`
 	ValidationIssues []*ValidationIssue
 	DriftWarnings    []*DriftWarning
 	ClusterInfo      *ClusterInfo
 }
 
-// ComposedResourceChange represents a predicted change to a composed/managed resource.
-type ComposedResourceChange struct {
-	ResourceKind    string             `json:"ResourceKind"`
-	ResourceName    string             `json:"ResourceName"`
-	APIVersion      string             `json:"APIVersion"`
-	CompositionStep string             `json:"CompositionStep"`
-	Depth           int                `json:"Depth"`
-	FieldChanges    []*ComposedField   `json:"FieldChanges"`
-}
-
-// ComposedField is a predicted field change on a composed resource.
-type ComposedField struct {
-	Path     string `json:"Path"`
-	OldValue string `json:"OldValue"`
-	NewValue string `json:"NewValue"`
-}
-
-// ResourceTreeNode represents a node in the Crossplane resource hierarchy.
-type ResourceTreeNode struct {
-	Kind       string              `json:"Kind"`
-	Name       string              `json:"Name"`
-	Namespace  string              `json:"Namespace,omitempty"`
-	APIVersion string              `json:"APIVersion"`
-	Children   []*ResourceTreeNode `json:"Children,omitempty"`
-}
 
 // ClusterInfo contains metadata about the operator's cluster connection.
 type ClusterInfo struct {
@@ -565,6 +585,7 @@ type GetResourceStatusResponse struct {
 	Children []*Resource
 }
 
+
 // convertTree converts an operator ResourceTreeNode to the server's type.
 func convertTree(node *operator.ResourceTreeNode) *ResourceTreeNode {
 	if node == nil {
@@ -577,7 +598,10 @@ func convertTree(node *operator.ResourceTreeNode) *ResourceTreeNode {
 		APIVersion: node.APIVersion,
 	}
 	for _, child := range node.Children {
-		n.Children = append(n.Children, convertTree(child))
+		c := convertTree(child)
+		if c != nil {
+			n.Children = append(n.Children, *c)
+		}
 	}
 	return n
 }

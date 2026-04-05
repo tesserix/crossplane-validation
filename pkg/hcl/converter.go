@@ -2,6 +2,7 @@ package hcl
 
 import (
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 
@@ -35,9 +36,18 @@ func Convert(rs *renderer.RenderedSet, providers map[string]config.Provider) (*C
 	for _, r := range rs.Resources {
 		block, err := convertResource(r, providers)
 		if err != nil {
+			fmt.Fprintf(os.Stderr, "  Skipping %s/%s: %v\n", r.Resource.GetKind(), r.Resource.GetName(), err)
 			continue
 		}
 		cs.ResourceBlocks = append(cs.ResourceBlocks, block)
+	}
+
+	if len(cs.ResourceBlocks) == 0 {
+		return nil, fmt.Errorf("no convertible managed resources found — only Claims/XRs were detected.\n" +
+			"  The --cloud flag requires managed resources (e.g., azure.upbound.io, aws.upbound.io types).\n" +
+			"  Options:\n" +
+			"    1. Include Composition YAML files in your manifests directories so the renderer can resolve Claims into managed resources\n" +
+			"    2. Use --live --cloud to resolve compositions via the in-cluster operator")
 	}
 
 	// Auto-detect required providers from the converted resources
@@ -209,7 +219,7 @@ func mapResourceType(apiVersion, kind string) (string, error) {
 		}
 	}
 
-	return deriveResourceType(group, kind), nil
+	return deriveResourceType(group, kind)
 }
 
 func providerForGroup(group string) (string, string) {
@@ -267,30 +277,34 @@ var resourceTypeOverrides = map[string]string{
 	"authorization.azure.upbound.io/RoleDefinition":         "azurerm_role_definition",
 }
 
-func deriveResourceType(group, kind string) string {
+func deriveResourceType(group, kind string) (string, error) {
 	snakeKind := camelToSnake(kind)
 
 	switch {
 	case strings.HasSuffix(group, ".aws.upbound.io") || strings.HasSuffix(group, ".aws.crossplane.io"):
 		service := strings.Split(group, ".")[0]
-		return "aws_" + service + "_" + snakeKind
+		return "aws_" + service + "_" + snakeKind, nil
 
 	case strings.HasSuffix(group, ".gcp.upbound.io") || strings.HasSuffix(group, ".gcp.crossplane.io"):
 		service := strings.Split(group, ".")[0]
-		return "google_" + service + "_" + snakeKind
+		return "google_" + service + "_" + snakeKind, nil
 
 	case strings.HasSuffix(group, ".azure.upbound.io") || strings.HasSuffix(group, ".azure.crossplane.io"):
 		service := strings.Split(group, ".")[0]
 		if service == "azure" {
-			return "azurerm_" + snakeKind
+			return "azurerm_" + snakeKind, nil
 		}
-		return "azurerm_" + service + "_" + snakeKind
+		return "azurerm_" + service + "_" + snakeKind, nil
 
 	case group == "azure.upbound.io":
-		return "azurerm_" + snakeKind
+		return "azurerm_" + snakeKind, nil
 
 	default:
-		return guessProvider(group) + "_" + snakeKind
+		provider := guessProvider(group)
+		if provider == "unknown" {
+			return "", fmt.Errorf("cannot map %s/%s to a Terraform resource type (custom XR/Claim type — not a managed resource)", group, kind)
+		}
+		return provider + "_" + snakeKind, nil
 	}
 }
 
@@ -615,7 +629,8 @@ func tfSuffixToARMType(suffix string) string {
 
 // guessTerraformType is kept for backward compatibility with tests
 func guessTerraformType(group, kind string) string {
-	return deriveResourceType(group, kind)
+	t, _ := deriveResourceType(group, kind)
+	return t
 }
 
 var mapStyleFields = map[string]bool{

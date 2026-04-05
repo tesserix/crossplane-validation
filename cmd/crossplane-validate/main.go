@@ -87,7 +87,7 @@ With --live, connects to the in-cluster operator and compares proposed manifests
 				if addr == "" {
 					addr = cfg.Operator.Address
 				}
-				return runLivePlan(liveOptions{
+				opts := liveOptions{
 					operatorAddr:  addr,
 					apiToken:      apiToken,
 					kubeContext:   kubeContext,
@@ -95,7 +95,11 @@ With --live, connects to the in-cluster operator and compares proposed manifests
 					manifestDirs:  cfg.ManifestDirs,
 					outputFmt:     outputFmt,
 					showSensitive: showSensitive,
-				})
+				}
+				if cloudMode {
+					return runLiveCloudPlan(opts, cfg.Providers)
+				}
+				return runLivePlan(opts)
 			}
 
 			fmt.Fprintln(os.Stderr, "Scanning manifests...")

@@ -49,6 +49,7 @@ func (s *HTTPServer) Start() error {
 	mux.HandleFunc("/api/v1/plan", s.requireAuth(s.handleComputePlan))
 	mux.HandleFunc("/api/v1/drift", s.requireAuth(s.handleGetDrift))
 	mux.HandleFunc("/api/v1/resource", s.requireAuth(s.handleGetResourceStatus))
+	mux.HandleFunc("/api/v1/resolve", s.requireAuth(s.handleResolveResources))
 
 	s.server = &http.Server{
 		Addr:              fmt.Sprintf(":%d", s.port),
@@ -147,6 +148,26 @@ func (s *HTTPServer) handleGetResourceStatus(w http.ResponseWriter, r *http.Requ
 	resp, err := s.service.GetResourceStatus(r.Context(), apiVersion, kind, name, namespace)
 	if err != nil {
 		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	writeJSON(w, resp)
+}
+
+func (s *HTTPServer) handleResolveResources(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, fmt.Errorf("POST required"))
+		return
+	}
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxRequestPayload+1))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+
+	resp, err := s.service.ResolveResources(r.Context(), body)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 	writeJSON(w, resp)

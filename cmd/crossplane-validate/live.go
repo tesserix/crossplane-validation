@@ -2,15 +2,22 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
 	"time"
 
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+
+	"github.com/tesserix/crossplane-validation/pkg/config"
 	grpcclient "github.com/tesserix/crossplane-validation/pkg/grpc"
+	"github.com/tesserix/crossplane-validation/pkg/hcl"
 	"github.com/tesserix/crossplane-validation/pkg/k8s"
 	"github.com/tesserix/crossplane-validation/pkg/operator"
 	"github.com/tesserix/crossplane-validation/pkg/plan"
+	"github.com/tesserix/crossplane-validation/pkg/renderer"
+	"github.com/tesserix/crossplane-validation/pkg/tofu"
 )
 
 type liveOptions struct {
@@ -75,6 +82,92 @@ func runLivePlan(opts liveOptions) error {
 	}
 
 	return renderLivePlan(liveResult, opts.outputFmt, os.Stdout)
+}
+
+func runLiveCloudPlan(opts liveOptions, providers map[string]config.Provider) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	address, cleanup, err := resolveOperatorAddress(ctx, opts)
+	if err != nil {
+		return err
+	}
+	if cleanup != nil {
+		defer cleanup()
+	}
+
+	fmt.Fprintf(os.Stderr, "Connecting to operator at %s...\n", address)
+
+	useTLS := strings.HasSuffix(address, ":443") || strings.HasPrefix(address, "https://")
+	cleanAddr := strings.TrimPrefix(strings.TrimPrefix(address, "https://"), "http://")
+	token := opts.apiToken
+	if token == "" {
+		token = os.Getenv("CROSSPLANE_VALIDATE_API_TOKEN")
+	}
+	client, err := grpcclient.Connect(ctx, grpcclient.ConnectOptions{
+		Address:  cleanAddr,
+		Timeout:  15 * time.Second,
+		TLS:      useTLS,
+		APIToken: token,
+	})
+	if err != nil {
+		return fmt.Errorf("connecting to operator: %w", err)
+	}
+	defer client.Close()
+
+	manifestYAML, err := readManifestDirs(opts.manifestDirs)
+	if err != nil {
+		return fmt.Errorf("reading manifests: %w", err)
+	}
+
+	fmt.Fprintln(os.Stderr, "Resolving compositions via operator...")
+
+	resolveResp, err := client.ResolveResources(ctx, manifestYAML)
+	if err != nil {
+		return fmt.Errorf("resolving resources: %w", err)
+	}
+
+	fmt.Fprintf(os.Stderr, "Resolved %d managed resources from compositions\n", resolveResp.Total)
+
+	if resolveResp.Total == 0 {
+		fmt.Fprintln(os.Stderr, "No managed resources found — Claims/XRs may not have been deployed yet")
+		return nil
+	}
+
+	// Convert resolved resources to RenderedSet for HCL conversion
+	rs := &renderer.RenderedSet{}
+	for _, res := range resolveResp.Resources {
+		var obj map[string]interface{}
+		if err := json.Unmarshal(res.RawJSON, &obj); err != nil {
+			continue
+		}
+		u := unstructured.Unstructured{Object: obj}
+		rs.Resources = append(rs.Resources, renderer.RenderedResource{
+			Source:   "live-cluster",
+			Resource: u,
+		})
+	}
+
+	fmt.Fprintln(os.Stderr, "Converting to HCL...")
+	hcl.UseSchemaLookup = true
+	targetHCL, err := hcl.Convert(rs, providers)
+	if err != nil {
+		return fmt.Errorf("converting to HCL: %w", err)
+	}
+
+	fmt.Fprintf(os.Stderr, "Generated %d Terraform resource blocks\n", len(targetHCL.ResourceBlocks))
+
+	fmt.Fprintln(os.Stderr, "Running cloud plan (read-only)...")
+	cloudPlan, err := tofu.Plan(nil, targetHCL, providers)
+	if err != nil {
+		return fmt.Errorf("running cloud plan: %w", err)
+	}
+
+	result := &plan.Result{
+		CloudPlan: cloudPlan,
+	}
+
+	return plan.Render(result, opts.outputFmt, os.Stdout)
 }
 
 func runLiveDrift(opts liveOptions) error {
@@ -261,7 +354,89 @@ func renderLivePlan(result *grpcclient.LivePlanResult, format string, w *os.File
 		renderDriftWarnings(w, result.DriftWarnings, format)
 	}
 
-	return plan.Render(result.Plan, format, w)
+	if err := plan.Render(result.Plan, format, w); err != nil {
+		return err
+	}
+
+	if len(result.ComposedChanges) > 0 {
+		renderComposedChanges(w, result.ComposedChanges, format)
+	}
+
+	if len(result.ResourceTree) > 0 {
+		renderResourceTree(w, result.ResourceTree, format)
+	}
+
+	return nil
+}
+
+func renderComposedChanges(w *os.File, changes []grpcclient.ComposedResourceChange, format string) {
+	yellow := "\033[33m"
+	cyan := "\033[36m"
+	red := "\033[31m"
+	green := "\033[32m"
+	reset := "\033[0m"
+	dim := "\033[2m"
+
+	if format == "markdown" {
+		return
+	}
+
+	fmt.Fprintf(w, "\n%s═══ Composed Resource Impact ═══%s\n\n", cyan, reset)
+
+	for _, cc := range changes {
+		indent := strings.Repeat("  ", cc.Depth)
+		fmt.Fprintf(w, "%s%s~ %s/%s%s", indent, yellow, cc.ResourceKind, cc.ResourceName, reset)
+		if cc.CompositionStep != "" {
+			fmt.Fprintf(w, " %s(via %s)%s", dim, cc.CompositionStep, reset)
+		}
+		fmt.Fprintln(w)
+
+		for _, f := range cc.FieldChanges {
+			fmt.Fprintf(w, "%s    %s- %s: %s%s\n", indent, red, f.Path, f.OldValue, reset)
+			fmt.Fprintf(w, "%s    %s+ %s: %s%s\n", indent, green, f.Path, f.NewValue, reset)
+		}
+	}
+}
+
+func renderResourceTree(w *os.File, trees []grpcclient.ResourceTreeNode, format string) {
+	cyan := "\033[36m"
+	dim := "\033[2m"
+	reset := "\033[0m"
+
+	if format == "markdown" {
+		return
+	}
+
+	fmt.Fprintf(w, "\n%s═══ Resource Tree ═══%s\n\n", cyan, reset)
+	for _, tree := range trees {
+		printTree(w, tree, "", true, dim, reset)
+	}
+	fmt.Fprintln(w)
+}
+
+func printTree(w *os.File, node grpcclient.ResourceTreeNode, prefix string, isLast bool, dim, reset string) {
+	connector := "├── "
+	if isLast {
+		connector = "└── "
+	}
+	if prefix == "" {
+		connector = ""
+	}
+
+	fmt.Fprintf(w, "%s%s%s/%s %s%s%s\n", prefix, connector, node.Kind, node.Name, dim, node.APIVersion, reset)
+
+	childPrefix := prefix
+	if prefix != "" {
+		if isLast {
+			childPrefix += "    "
+		} else {
+			childPrefix += "│   "
+		}
+	}
+
+	for i, child := range node.Children {
+		printTree(w, child, childPrefix, i == len(node.Children)-1, dim, reset)
+	}
 }
 
 func renderDriftWarnings(w *os.File, warnings []operator.DriftWarning, format string) {

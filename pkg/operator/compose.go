@@ -442,6 +442,82 @@ func getNestedField(obj map[string]interface{}, path string) (interface{}, bool)
 	return nil, false
 }
 
+// ResolveAllManagedResources returns all managed resources that a given Claim/XR
+// resolves to through the composition chain. This walks the resource tree from the
+// cache and collects all leaf managed resources (*.upbound.io, *.crossplane.io types).
+func ResolveAllManagedResources(cache *StateCache, proposed *unstructured.Unstructured) []unstructured.Unstructured {
+	var result []unstructured.Unstructured
+
+	// Find the XR owned by this Claim
+	xr := findOwnedXR(cache, proposed)
+	if xr == nil {
+		xr = proposed
+		xrLive := findLiveResource(cache, proposed.GetAPIVersion(), proposed.GetKind(), "", proposed.GetName())
+		if xrLive != nil {
+			xr = xrLive
+		}
+	}
+
+	collectManagedResources(cache, xr, &result, 0)
+	return result
+}
+
+// collectManagedResources recursively walks the resource tree and collects managed resources.
+func collectManagedResources(cache *StateCache, xr *unstructured.Unstructured, result *[]unstructured.Unstructured, depth int) {
+	if depth > 5 {
+		return
+	}
+
+	liveXR := findLiveResource(cache, xr.GetAPIVersion(), xr.GetKind(), xr.GetNamespace(), xr.GetName())
+	if liveXR == nil {
+		return
+	}
+
+	refs, found, _ := unstructured.NestedSlice(liveXR.Object, "spec", "resourceRefs")
+	if !found {
+		refs, _, _ = unstructured.NestedSlice(liveXR.Object, "spec", "crossplane", "resourceRefs")
+	}
+
+	for _, refRaw := range refs {
+		ref, ok := refRaw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		refKind, _ := ref["kind"].(string)
+		refName, _ := ref["name"].(string)
+		refAPIVersion, _ := ref["apiVersion"].(string)
+
+		childRes := findLiveResource(cache, refAPIVersion, refKind, "", refName)
+		if childRes == nil {
+			continue
+		}
+
+		group := extractGroup(refAPIVersion)
+		if isManagedResourceGroup(group) {
+			*result = append(*result, *childRes.DeepCopy())
+		} else {
+			// This is a composed XR — recurse into it
+			collectManagedResources(cache, childRes, result, depth+1)
+		}
+	}
+}
+
+func extractGroup(apiVersion string) string {
+	parts := strings.SplitN(apiVersion, "/", 2)
+	if len(parts) == 2 {
+		return parts[0]
+	}
+	return ""
+}
+
+func isManagedResourceGroup(group string) bool {
+	return strings.HasSuffix(group, ".upbound.io") ||
+		group == "upbound.io" ||
+		strings.Contains(group, ".aws.crossplane.io") ||
+		strings.Contains(group, ".gcp.crossplane.io") ||
+		strings.Contains(group, ".azure.crossplane.io")
+}
+
 // deepCopyMap creates a deep copy of a map.
 func deepCopyMap(m map[string]interface{}) map[string]interface{} {
 	data, _ := json.Marshal(m)

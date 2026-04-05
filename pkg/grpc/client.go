@@ -119,6 +119,22 @@ func (c *Client) GetClusterState(ctx context.Context, namespace, kind, apiGroup 
 	return &resp, nil
 }
 
+// ResolveResources sends proposed manifests (Claims/XRs) to the operator and receives
+// the resolved managed resources from the composition chain in the live cluster.
+func (c *Client) ResolveResources(ctx context.Context, proposedYAML []byte) (*ResolveResourcesResponse, error) {
+	var resp ResolveResourcesResponse
+	if err := c.post(ctx, "/api/v1/resolve", proposedYAML, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// ResolveResourcesResponse contains managed resources resolved from Claims/XRs.
+type ResolveResourcesResponse struct {
+	Resources []*Resource
+	Total     int32
+}
+
 // GetResourceStatus returns detailed status for a specific resource.
 func (c *Client) GetResourceStatus(ctx context.Context, apiVersion, kind, name, namespace string) (*GetResourceStatusResponse, error) {
 	path := fmt.Sprintf("/api/v1/resource?apiVersion=%s&kind=%s&name=%s&namespace=%s",
@@ -200,9 +216,37 @@ func (c *Client) setAuth(req *http.Request) {
 
 // LivePlanResult holds the plan output along with drift warnings and cluster metadata.
 type LivePlanResult struct {
-	Plan          *plan.Result
-	DriftWarnings []operator.DriftWarning
-	ClusterInfo   *ClusterInfo
+	Plan            *plan.Result
+	ComposedChanges []ComposedResourceChange
+	ResourceTree    []ResourceTreeNode
+	DriftWarnings   []operator.DriftWarning
+	ClusterInfo     *ClusterInfo
+}
+
+// ComposedResourceChange represents a predicted change to a downstream composed resource.
+type ComposedResourceChange struct {
+	ResourceKind    string
+	ResourceName    string
+	APIVersion      string
+	CompositionStep string
+	Depth           int
+	FieldChanges    []ComposedFieldChange
+}
+
+// ComposedFieldChange is a predicted field change on a composed resource.
+type ComposedFieldChange struct {
+	Path     string
+	OldValue string
+	NewValue string
+}
+
+// ResourceTreeNode represents a node in the Crossplane resource hierarchy.
+type ResourceTreeNode struct {
+	Kind       string
+	Name       string
+	Namespace  string
+	APIVersion string
+	Children   []ResourceTreeNode
 }
 
 // LiveDriftResult holds the drift analysis results.
@@ -265,6 +309,28 @@ func convertComputePlanResponse(resp *ComputePlanResponse) *LivePlanResult {
 
 	result.Plan = planResult
 
+	for _, cc := range resp.ComposedChanges {
+		change := ComposedResourceChange{
+			ResourceKind:    cc.ResourceKind,
+			ResourceName:    cc.ResourceName,
+			APIVersion:      cc.APIVersion,
+			CompositionStep: cc.CompositionStep,
+			Depth:           cc.Depth,
+		}
+		for _, f := range cc.FieldChanges {
+			change.FieldChanges = append(change.FieldChanges, ComposedFieldChange{
+				Path:     f.Path,
+				OldValue: f.OldValue,
+				NewValue: f.NewValue,
+			})
+		}
+		result.ComposedChanges = append(result.ComposedChanges, change)
+	}
+
+	for _, t := range resp.ResourceTree {
+		result.ResourceTree = append(result.ResourceTree, convertTreeNode(t))
+	}
+
 	for _, warn := range resp.DriftWarnings {
 		result.DriftWarnings = append(result.DriftWarnings, operator.DriftWarning{
 			ResourceKey: warn.ResourceKey,
@@ -308,4 +374,17 @@ func convertDriftResponse(resp *GetDriftResponse) *LiveDriftResult {
 	}
 
 	return result
+}
+
+func convertTreeNode(n ResourceTreeNode) ResourceTreeNode {
+	node := ResourceTreeNode{
+		Kind:       n.Kind,
+		Name:       n.Name,
+		Namespace:  n.Namespace,
+		APIVersion: n.APIVersion,
+	}
+	for _, child := range n.Children {
+		node.Children = append(node.Children, convertTreeNode(child))
+	}
+	return node
 }
