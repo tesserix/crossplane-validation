@@ -51,7 +51,7 @@ func Connect(ctx context.Context, opts ConnectOptions) (*Client, error) {
 		apiToken: opts.APIToken,
 	}
 
-	healthCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	healthCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 
 	_, err := client.Health(healthCtx)
