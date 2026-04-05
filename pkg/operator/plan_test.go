@@ -116,22 +116,24 @@ spec:
 	}
 }
 
-func TestComputeLivePlanDelete(t *testing.T) {
+func TestComputeLivePlanScopedNoFalseDeletes(t *testing.T) {
 	cache := &StateCache{
 		resources: make(map[string]*unstructured.Unstructured),
 	}
 
+	// Add a resource to the cache that is NOT in the proposed set
 	obj := &unstructured.Unstructured{
 		Object: map[string]interface{}{
 			"apiVersion": "s3.aws.upbound.io/v1beta1",
 			"kind":       "Bucket",
-			"metadata":   map[string]interface{}{"name": "old-bucket"},
+			"metadata":   map[string]interface{}{"name": "unrelated-bucket"},
 			"spec":       map[string]interface{}{"forProvider": map[string]interface{}{"region": "us-east-1"}},
 		},
 	}
 	cache.onAdd(obj)
 
-	// empty proposed = the resource is being removed
+	// Proposed set is empty — live plan should NOT show the unrelated bucket as a deletion.
+	// Live plan is scoped to only what's in the proposed manifests.
 	result, _, err := ComputeLivePlan(cache, LivePlanRequest{
 		ProposedYAML: []byte(""),
 	})
@@ -139,8 +141,8 @@ func TestComputeLivePlanDelete(t *testing.T) {
 		t.Fatalf("ComputeLivePlan failed: %v", err)
 	}
 
-	if result.StructuralDiff.Summary.ToDelete != 1 {
-		t.Errorf("expected 1 to delete, got %d", result.StructuralDiff.Summary.ToDelete)
+	if result.StructuralDiff.Summary.ToDelete != 0 {
+		t.Errorf("scoped live plan should not show unrelated resources as deletes, got %d", result.StructuralDiff.Summary.ToDelete)
 	}
 }
 
