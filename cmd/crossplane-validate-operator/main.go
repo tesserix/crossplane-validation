@@ -103,14 +103,22 @@ func main() {
 		Notifier: notifier,
 	})
 
+	httpAPI := grpcpkg.NewHTTPServer(grpcpkg.HTTPServerConfig{
+		Cache:    cache,
+		Port:     grpcPort,
+		Notifier: notifier,
+	})
+
 	var ready atomic.Bool
 	errCh := make(chan error, 2)
 
 	go func() {
-		if err := server.Start(); err != nil {
-			errCh <- fmt.Errorf("gRPC server: %w", err)
+		if err := httpAPI.Start(); err != nil {
+			errCh <- fmt.Errorf("HTTP API server: %w", err)
 		}
 	}()
+
+	_ = server // gRPC server reserved for proto-based clients
 
 	healthSrv := startHealthServer(healthPort, cache, &ready)
 
@@ -200,7 +208,7 @@ func main() {
 	if err := healthSrv.Shutdown(shutdownCtx); err != nil {
 		log.Printf("health server shutdown: %v", err)
 	}
-	server.Stop()
+	httpAPI.Stop()
 	cache.Stop()
 }
 

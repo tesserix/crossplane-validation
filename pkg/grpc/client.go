@@ -1,14 +1,15 @@
+// Package grpc provides the gRPC server and client for communication between
+// the crossplane-validate CLI and the in-cluster operator.
 package grpc
 
 import (
+	"bytes"
 	"context"
-	"crypto/tls"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"time"
-
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/tesserix/crossplane-validation/pkg/diff"
 	"github.com/tesserix/crossplane-validation/pkg/operator"
@@ -16,106 +17,174 @@ import (
 	"github.com/tesserix/crossplane-validation/pkg/validate"
 )
 
-// Client connects to the operator's gRPC service.
+// Client connects to the operator's API.
 type Client struct {
-	conn    *grpc.ClientConn
-	service *ValidationServiceImpl
-	address string
+	baseURL    string
+	httpClient *http.Client
 }
 
-// ConnectOptions configures the gRPC client connection.
+// ConnectOptions configures the client connection.
 type ConnectOptions struct {
 	Address string
 	Timeout time.Duration
 	TLS     bool
 }
 
-// Connect establishes a gRPC connection to the operator.
+// Connect establishes a connection to the operator.
 func Connect(ctx context.Context, opts ConnectOptions) (*Client, error) {
 	if opts.Timeout == 0 {
-		opts.Timeout = 10 * time.Second
+		opts.Timeout = 30 * time.Second
 	}
 
-	dialCtx, cancel := context.WithTimeout(ctx, opts.Timeout)
+	scheme := "http"
+	if opts.TLS {
+		scheme = "https"
+	}
+
+	client := &Client{
+		baseURL: fmt.Sprintf("%s://%s", scheme, opts.Address),
+		httpClient: &http.Client{
+			Timeout: opts.Timeout,
+		},
+	}
+
+	healthCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	var transportCreds grpc.DialOption
-	if opts.TLS {
-		transportCreds = grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{
-			MinVersion: tls.VersionTLS12,
-		}))
-	} else {
-		transportCreds = grpc.WithTransportCredentials(insecure.NewCredentials())
-	}
-
-	conn, err := grpc.DialContext(dialCtx, opts.Address,
-		transportCreds,
-		grpc.WithBlock(),
-	)
+	_, err := client.Health(healthCtx)
 	if err != nil {
-		return nil, fmt.Errorf("connecting to operator at %s: %w", opts.Address, err)
+		return nil, fmt.Errorf("operator at %s not reachable: %w", opts.Address, err)
 	}
 
-	return &Client{
-		conn:    conn,
-		address: opts.Address,
-	}, nil
+	return client, nil
 }
 
-// Close terminates the gRPC connection.
+// Close is a no-op for HTTP clients but satisfies the interface.
 func (c *Client) Close() error {
-	if c.conn != nil {
-		return c.conn.Close()
-	}
 	return nil
 }
 
 // Health returns the operator health status.
 func (c *Client) Health(ctx context.Context) (*HealthResponse, error) {
-	if c.service != nil {
-		return c.service.Health(ctx)
+	var resp HealthResponse
+	if err := c.get(ctx, "/api/v1/health", &resp); err != nil {
+		return nil, err
 	}
-	return nil, fmt.Errorf("not connected")
+	return &resp, nil
 }
 
 // ComputePlan sends proposed manifests to the operator and receives a plan.
 func (c *Client) ComputePlan(ctx context.Context, proposedYAML []byte, showSensitive bool) (*LivePlanResult, error) {
-	if c.service != nil {
-		resp, err := c.service.ComputePlan(ctx, proposedYAML, showSensitive)
-		if err != nil {
-			return nil, err
-		}
-		return convertComputePlanResponse(resp), nil
+	path := "/api/v1/plan"
+	if showSensitive {
+		path += "?showSensitive=true"
 	}
-	return nil, fmt.Errorf("not connected")
+
+	var resp ComputePlanResponse
+	if err := c.post(ctx, path, proposedYAML, &resp); err != nil {
+		return nil, err
+	}
+	return convertComputePlanResponse(&resp), nil
 }
 
 // GetDrift sends git manifests to the operator and receives a drift report.
 func (c *Client) GetDrift(ctx context.Context, gitYAML []byte) (*LiveDriftResult, error) {
-	if c.service != nil {
-		resp, err := c.service.GetDrift(ctx, gitYAML)
-		if err != nil {
-			return nil, err
-		}
-		return convertDriftResponse(resp), nil
+	var resp GetDriftResponse
+	if err := c.post(ctx, "/api/v1/drift", gitYAML, &resp); err != nil {
+		return nil, err
 	}
-	return nil, fmt.Errorf("not connected")
+	return convertDriftResponse(&resp), nil
 }
 
 // GetClusterState returns all cached Crossplane resources from the operator.
 func (c *Client) GetClusterState(ctx context.Context, namespace, kind, apiGroup string) (*GetClusterStateResponse, error) {
-	if c.service != nil {
-		return c.service.GetClusterState(ctx, namespace, kind, apiGroup)
+	path := "/api/v1/state?"
+	if namespace != "" {
+		path += "namespace=" + namespace + "&"
 	}
-	return nil, fmt.Errorf("not connected")
+	if kind != "" {
+		path += "kind=" + kind + "&"
+	}
+	if apiGroup != "" {
+		path += "apiGroup=" + apiGroup + "&"
+	}
+
+	var resp GetClusterStateResponse
+	if err := c.get(ctx, path, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
 }
 
 // GetResourceStatus returns detailed status for a specific resource.
 func (c *Client) GetResourceStatus(ctx context.Context, apiVersion, kind, name, namespace string) (*GetResourceStatusResponse, error) {
-	if c.service != nil {
-		return c.service.GetResourceStatus(ctx, apiVersion, kind, name, namespace)
+	path := fmt.Sprintf("/api/v1/resource?apiVersion=%s&kind=%s&name=%s&namespace=%s",
+		apiVersion, kind, name, namespace)
+
+	var resp GetResourceStatusResponse
+	if err := c.get(ctx, path, &resp); err != nil {
+		return nil, err
 	}
-	return nil, fmt.Errorf("not connected")
+	return &resp, nil
+}
+
+func (c *Client) get(ctx context.Context, path string, result interface{}) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
+	if err != nil {
+		return err
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("reading response: %w", err)
+	}
+
+	if resp.StatusCode >= 400 {
+		var errResp map[string]string
+		json.Unmarshal(body, &errResp)
+		if msg, ok := errResp["error"]; ok {
+			return fmt.Errorf("operator error: %s", msg)
+		}
+		return fmt.Errorf("operator returned %d", resp.StatusCode)
+	}
+
+	return json.Unmarshal(body, result)
+}
+
+func (c *Client) post(ctx context.Context, path string, data []byte, result interface{}) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/x-yaml")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("reading response: %w", err)
+	}
+
+	if resp.StatusCode >= 400 {
+		var errResp map[string]string
+		json.Unmarshal(body, &errResp)
+		if msg, ok := errResp["error"]; ok {
+			return fmt.Errorf("operator error: %s", msg)
+		}
+		return fmt.Errorf("operator returned %d", resp.StatusCode)
+	}
+
+	return json.Unmarshal(body, result)
 }
 
 // LivePlanResult holds the plan output along with drift warnings and cluster metadata.
@@ -208,15 +277,15 @@ func convertDriftResponse(resp *GetDriftResponse) *LiveDriftResult {
 		}
 	}
 
-	for _, drift := range resp.Drifts {
+	for _, d := range resp.Drifts {
 		dr := operator.DriftResult{
-			ResourceKey: drift.ResourceKey,
-			Kind:        drift.Kind,
-			Name:        drift.Name,
-			Namespace:   drift.Namespace,
-			DriftType:   operator.DriftType(drift.DriftType),
+			ResourceKey: d.ResourceKey,
+			Kind:        d.Kind,
+			Name:        d.Name,
+			Namespace:   d.Namespace,
+			DriftType:   operator.DriftType(d.DriftType),
 		}
-		for _, fc := range drift.FieldChanges {
+		for _, fc := range d.FieldChanges {
 			dr.Changes = append(dr.Changes, diff.FieldChange{
 				Path:     fc.Path,
 				Action:   diff.Action(fc.Action),
