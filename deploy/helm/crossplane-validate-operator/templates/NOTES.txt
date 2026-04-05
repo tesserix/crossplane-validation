@@ -1,0 +1,26 @@
+crossplane-validate-operator has been deployed.
+
+Operator is running in namespace: {{ .Release.Namespace }}
+gRPC port: {{ .Values.service.grpcPort }}
+Health port: {{ .Values.service.healthPort }}
+
+To verify the operator is running:
+
+  kubectl get pods -n {{ .Release.Namespace }} -l app.kubernetes.io/name={{ include "operator.name" . }}
+
+To use the CLI with the operator:
+
+  crossplane-validate plan --live --manifests=./crossplane/
+
+Or connect directly:
+
+  kubectl port-forward -n {{ .Release.Namespace }} svc/{{ include "operator.fullname" . }} {{ .Values.service.grpcPort }}:{{ .Values.service.grpcPort }} &
+  crossplane-validate plan --live --operator-address=localhost:{{ .Values.service.grpcPort }} --manifests=./crossplane/
+
+To check drift:
+
+  crossplane-validate drift --manifests=./crossplane/
+
+To view cluster status:
+
+  crossplane-validate status

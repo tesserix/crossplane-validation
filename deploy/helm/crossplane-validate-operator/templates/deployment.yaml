@@ -1,31 +1,39 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ .Release.Name }}
+  name: {{ include "operator.fullname" . }}
   namespace: {{ .Release.Namespace }}
   labels:
-    app.kubernetes.io/name: crossplane-validate-operator
-    app.kubernetes.io/instance: {{ .Release.Name }}
+    {{- include "operator.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
   selector:
     matchLabels:
-      app.kubernetes.io/name: crossplane-validate-operator
-      app.kubernetes.io/instance: {{ .Release.Name }}
+      {{- include "operator.selectorLabels" . | nindent 6 }}
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: crossplane-validate-operator
-        app.kubernetes.io/instance: {{ .Release.Name }}
+        {{- include "operator.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
     spec:
-      serviceAccountName: {{ .Values.serviceAccount.name }}
+      serviceAccountName: {{ include "operator.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       securityContext:
         runAsNonRoot: true
         runAsUser: 65534
         fsGroup: 65534
       containers:
         - name: operator
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          image: {{ include "operator.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           securityContext:
             allowPrivilegeEscalation: false
@@ -45,6 +53,31 @@ spec:
             {{- end }}
             {{- if and .Values.notifications.teams.enabled .Values.notifications.teams.webhookUrl }}
             - --teams-webhook={{ .Values.notifications.teams.webhookUrl }}
+            {{- end }}
+          env:
+            {{- if and .Values.cloudCredentials.reuseProviderSecret (eq .Values.cloudCredentials.provider "aws") }}
+            - name: AWS_SHARED_CREDENTIALS_FILE
+              value: /var/run/secrets/provider/{{ .Values.cloudCredentials.reuseProviderSecretKey }}
+            {{- end }}
+            {{- if and .Values.cloudCredentials.reuseProviderSecret (eq .Values.cloudCredentials.provider "gcp") }}
+            - name: GOOGLE_APPLICATION_CREDENTIALS
+              value: /var/run/secrets/provider/{{ .Values.cloudCredentials.reuseProviderSecretKey }}
+            {{- end }}
+            {{- if .Values.cloudCredentials.envFromSecret }}
+            {{- range $envVar, $secretKey := .Values.cloudCredentials.envFromSecret }}
+            - name: {{ $envVar }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.cloudCredentials.existingSecret }}
+                  key: {{ $secretKey }}
+            {{- end }}
+            {{- end }}
+            {{- if .Values.cloudCredentials.gcpKeySecret }}
+            - name: GOOGLE_APPLICATION_CREDENTIALS
+              value: /var/run/secrets/gcp/{{ .Values.cloudCredentials.gcpKeySecretKey }}
+            {{- end }}
+            {{- with .Values.cloudCredentials.extraEnv }}
+            {{- toYaml . | nindent 12 }}
             {{- end }}
           ports:
             - name: grpc
@@ -67,6 +100,32 @@ spec:
             periodSeconds: 5
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+          {{- if or .Values.cloudCredentials.reuseProviderSecret .Values.cloudCredentials.gcpKeySecret }}
+          volumeMounts:
+            {{- if .Values.cloudCredentials.reuseProviderSecret }}
+            - name: provider-creds
+              mountPath: /var/run/secrets/provider
+              readOnly: true
+            {{- end }}
+            {{- if .Values.cloudCredentials.gcpKeySecret }}
+            - name: gcp-key
+              mountPath: /var/run/secrets/gcp
+              readOnly: true
+            {{- end }}
+          {{- end }}
+      {{- if or .Values.cloudCredentials.reuseProviderSecret .Values.cloudCredentials.gcpKeySecret }}
+      volumes:
+        {{- if .Values.cloudCredentials.reuseProviderSecret }}
+        - name: provider-creds
+          secret:
+            secretName: {{ .Values.cloudCredentials.reuseProviderSecret }}
+        {{- end }}
+        {{- if .Values.cloudCredentials.gcpKeySecret }}
+        - name: gcp-key
+          secret:
+            secretName: {{ .Values.cloudCredentials.gcpKeySecret }}
+        {{- end }}
+      {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

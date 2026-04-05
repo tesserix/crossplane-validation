@@ -1,9 +1,14 @@
 replicaCount: 1
 
+nameOverride: ""
+fullnameOverride: ""
+
 image:
   repository: ghcr.io/tesserix/crossplane-validate-operator
   tag: ""
   pullPolicy: IfNotPresent
+
+imagePullSecrets: []
 
 service:
   type: ClusterIP
@@ -12,12 +17,19 @@ service:
 
 serviceAccount:
   create: true
-  name: crossplane-validate-operator
+  name: ""
   annotations: {}
+  # For AWS IRSA:
+  #   eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/crossplane-validate-readonly
+  # For GCP Workload Identity:
+  #   iam.gke.io/gcp-service-account: validate@my-project.iam.gserviceaccount.com
 
 rbac:
   create: true
+  # Additional API groups to grant read access (for custom XR types)
   watchGroups: []
+  # - platform.example.org
+  # - storage.example.org
 
 resources:
   limits:
@@ -26,14 +38,87 @@ resources:
     cpu: 100m
     memory: 128Mi
 
+podAnnotations: {}
+podLabels: {}
+
 nodeSelector: {}
 tolerations: []
 affinity: {}
 
+# Operator runtime configuration
 operator:
   logLevel: info
+  # Comma-separated additional API groups to watch
   watchGroups: ""
 
+# Cloud credentials for --cloud mode (optional).
+# The operator needs cloud read access for live plan comparisons.
+#
+# RECOMMENDED: Reuse Crossplane's existing credentials.
+# Crossplane stores provider secrets in the cluster — the operator can read
+# the same secret that your ProviderConfig references.
+#
+# Example: If your Crossplane ProviderConfig for AWS references a secret:
+#   apiVersion: aws.upbound.io/v1beta1
+#   kind: ProviderConfig
+#   spec:
+#     credentials:
+#       source: Secret
+#       secretRef:
+#         name: aws-provider-creds    <-- use this as existingSecret
+#         namespace: crossplane-system
+#         key: credentials
+#
+# Then set:
+#   cloudCredentials:
+#     reuseProviderSecret: aws-provider-creds
+#     reuseProviderSecretKey: credentials
+#     reuseProviderSecretNamespace: crossplane-system
+#     provider: aws
+#
+cloudCredentials:
+  # Option 1: Reuse Crossplane's ProviderConfig secret (recommended).
+  # The operator mounts the same secret Crossplane uses — no duplicate credentials.
+  reuseProviderSecret: ""
+  reuseProviderSecretKey: "credentials"
+  reuseProviderSecretNamespace: ""
+  # Provider type determines how the secret is mapped to env vars.
+  # "aws"   -> AWS_SHARED_CREDENTIALS_FILE
+  # "gcp"   -> GOOGLE_APPLICATION_CREDENTIALS
+  # "azure" -> ARM_* env vars parsed from secret
+  provider: ""
+
+  # Option 2: Use an existing secret with explicit key->env mappings.
+  existingSecret: ""
+  envFromSecret: {}
+  # Example for AWS:
+  #   AWS_ACCESS_KEY_ID: aws-access-key-id
+  #   AWS_SECRET_ACCESS_KEY: aws-secret-access-key
+
+  # Option 3: Mount a GCP service account key file from a secret.
+  gcpKeySecret: ""
+  gcpKeySecretKey: "key.json"
+
+  # Option 4: Use IRSA (AWS), Workload Identity (GCP), or Pod Identity (Azure).
+  # No secret needed — configure the service account annotation above instead.
+  # For AWS IRSA:
+  #   serviceAccount.annotations:
+  #     eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/crossplane-validate
+  # For GCP Workload Identity:
+  #   serviceAccount.annotations:
+  #     iam.gke.io/gcp-service-account: validate@my-project.iam.gserviceaccount.com
+  # For Azure Workload Identity:
+  #   podLabels:
+  #     azure.workload.identity/use: "true"
+  #   serviceAccount.annotations:
+  #     azure.workload.identity/client-id: <client-id>
+
+  # Extra environment variables (always applied)
+  extraEnv: []
+  # - name: AWS_DEFAULT_REGION
+  #   value: us-east-1
+
+# Notification channels
 notifications:
   slack:
     enabled: false
@@ -42,3 +127,8 @@ notifications:
   teams:
     enabled: false
     webhookUrl: ""
+
+# Pod disruption budget (for HA setups with replicaCount > 1)
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1

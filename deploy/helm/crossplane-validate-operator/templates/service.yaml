@@ -1,11 +1,10 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ .Release.Name }}
+  name: {{ include "operator.fullname" . }}
   namespace: {{ .Release.Namespace }}
   labels:
-    app.kubernetes.io/name: crossplane-validate-operator
-    app.kubernetes.io/instance: {{ .Release.Name }}
+    {{- include "operator.labels" . | nindent 4 }}
 spec:
   type: {{ .Values.service.type }}
   ports:
@@ -18,5 +17,4 @@ spec:
       targetPort: health
       protocol: TCP
   selector:
-    app.kubernetes.io/name: crossplane-validate-operator
-    app.kubernetes.io/instance: {{ .Release.Name }}
+    {{- include "operator.selectorLabels" . | nindent 4 }}
